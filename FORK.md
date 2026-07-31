@@ -11,7 +11,7 @@ also searchable.
 | File | Change |
 | --- | --- |
 | `prisma/schema.prisma` | `Session.ip String? @db.VarChar(45)` |
-| `prisma/migrations/21_add_session_ip/migration.sql` | `ALTER TABLE "session" ADD COLUMN "ip" VARCHAR(45)` |
+| `prisma/migrations/fork_add_session_ip/migration.sql` | `ALTER TABLE "session" ADD COLUMN "ip" VARCHAR(45)` |
 | `src/lib/constants.ts` | `FIELD_LENGTH.ip = 45` |
 | `src/app/api/send/route.ts` | resolves the IP to persist; refreshes it for cached sessions |
 | `src/queries/sql/sessions/createSession.ts` | writes `ip`; upserts it when it changes |
@@ -179,7 +179,7 @@ Either way:
 - Keep the **same `APP_SECRET`** and the **same database volume** as the current
   deployment, otherwise existing sessions and logins are invalidated.
 - The container runs `prisma migrate deploy` on start (`npm run start-docker` →
-  `check-db`), so `21_add_session_ip` applies automatically on first boot. No manual SQL.
+  `check-db`), so `fork_add_session_ip` applies automatically on first boot. No manual SQL.
 - Keep the Cloudflare proxy (orange cloud) on, and keep Dokploy's Traefik router in front
   — `CF-Connecting-IP` passes through untouched.
 
@@ -191,5 +191,14 @@ git fetch upstream
 git rebase upstream/master
 ```
 
-Expect conflicts only in `createSession.ts` and `getWebsiteSession.ts` if upstream
-changes the session columns.
+Expect conflicts mainly in `src/app/api/send/route.ts`, which upstream touches often and
+which holds most of this patch's logic. The rest are one-line insertions into lists
+(`messages.ts`, `constants.ts`, `en-US.json`, `schema.prisma`) that usually auto-merge, or
+low-churn query files where the resolution is "add `ip` back to the select and group by".
+
+The migration directory is deliberately named `fork_add_session_ip` rather than taking the
+next number. Upstream adds roughly two dozen migrations a year, so any number we picked
+would eventually collide; a letter prefix sorts after every numeric one and can never
+clash. **Do not rename it once it has been applied** — Prisma keys `_prisma_migrations` on
+the directory name, so a rename makes it look unapplied and the re-run of
+`ADD COLUMN "ip"` fails the deploy.
