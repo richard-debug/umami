@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 import { DateDistance } from '@/components/common/DateDistance';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useLocale, useMessages, useRegionNames } from '@/components/hooks';
-import { Calendar, KeyRound, Landmark, MapPin } from '@/components/icons';
+import { Calendar, KeyRound, Landmark, MapPin, Network } from '@/components/icons';
 
 export function SessionInfo({ data }) {
   const { locale } = useLocale();
@@ -37,6 +37,10 @@ export function SessionInfo({ data }) {
 
       <Info label={t(labels.city)} icon={<Landmark />}>
         {data?.city}
+      </Info>
+
+      <Info label={t(labels.ipAddress)} icon={<Network />}>
+        {data?.ip && <span style={{ overflowWrap: 'anywhere' }}>{data.ip}</span>}
       </Info>
 
       <Info label={t(labels.browser)} icon={<TypeIcon type="browser" value={data?.browser} />}>

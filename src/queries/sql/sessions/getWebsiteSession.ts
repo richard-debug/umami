@@ -28,6 +28,7 @@ async function relationalQuery(websiteId: string, sessionId: string) {
       country,
       region,
       city,
+      ip,
       min(min_time) as "firstAt",
       max(max_time) as "lastAt",
       count(distinct visit_id) as visits,
@@ -47,6 +48,7 @@ async function relationalQuery(websiteId: string, sessionId: string) {
           session.country,
           session.region,
           session.city,
+          session.ip,
           min(website_event.created_at) as min_time,
           max(website_event.created_at) as max_time,
           sum(case when website_event.event_type = 1 then 1 else 0 end) as views,
@@ -56,8 +58,8 @@ async function relationalQuery(websiteId: string, sessionId: string) {
     where session.website_id = {{websiteId::uuid}}
       and session.session_id = {{sessionId::uuid}}
       and website_event.event_type != ${EVENT_TYPE.performance}
-    group by session.session_id, session.distinct_id, visit_id, session.website_id, session.browser, session.os, session.device, session.screen, session.language, session.country, session.region, session.city) t
-    group by id, distinct_id, website_id, browser, os, device, screen, language, country, region, city;
+    group by session.session_id, session.distinct_id, visit_id, session.website_id, session.browser, session.os, session.device, session.screen, session.language, session.country, session.region, session.city, session.ip) t
+    group by id, distinct_id, website_id, browser, os, device, screen, language, country, region, city, ip;
     `,
     { websiteId, sessionId },
     FUNCTION_NAME,

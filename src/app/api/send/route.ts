@@ -166,6 +166,7 @@ export async function POST(request: Request) {
         country,
         region,
         city,
+        ip: process.env.DISABLE_CLIENT_IP ? undefined : ip,
         distinctId: id,
         createdAt,
       });

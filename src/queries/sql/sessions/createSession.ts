@@ -17,6 +17,7 @@ export async function createSession(data: Prisma.SessionCreateInput) {
     country: truncateString(data.country, FIELD_LENGTH.country),
     region: truncateString(data.region, FIELD_LENGTH.region),
     city: truncateString(data.city, FIELD_LENGTH.city),
+    ip: truncateString(data.ip, FIELD_LENGTH.ip),
     distinctId: truncateString(data.distinctId, FIELD_LENGTH.distinctId),
   };
 
@@ -33,6 +34,7 @@ export async function createSession(data: Prisma.SessionCreateInput) {
       country,
       region,
       city,
+      ip,
       distinct_id,
       created_at
     )
@@ -47,10 +49,14 @@ export async function createSession(data: Prisma.SessionCreateInput) {
       {{country}},
       {{region}},
       {{city}},
+      {{ip}},
       {{distinctId}},
       {{createdAt}}
     )
-    on conflict (session_id) do nothing
+    on conflict (session_id) do update
+      set ip = excluded.ip
+      where excluded.ip is not null
+        and session.ip is distinct from excluded.ip
     `,
     normalizedData,
     FUNCTION_NAME,
