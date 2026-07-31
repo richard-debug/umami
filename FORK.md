@@ -1,9 +1,10 @@
-# Fork: show visitor IP address in the session detail
+# Fork: show visitor IP address
 
 Upstream Umami deliberately never persists IP addresses — it hashes
 `websiteId + ip + userAgent + salt` into a session ID and throws the IP away. This fork
-stores the IP on the session row and renders it in the visitor (session) detail panel,
-next to Country / Region / City.
+stores the IP on the session row, renders it in the visitor (session) detail panel next
+to Country / Region / City, and shows it as a column in the sessions list — where it is
+also searchable.
 
 ## What changed
 
@@ -15,8 +16,11 @@ next to Country / Region / City.
 | `src/app/api/send/route.ts` | passes the resolved client IP into `createSession` |
 | `src/queries/sql/sessions/createSession.ts` | writes `ip`; upserts it when it changes |
 | `src/queries/sql/sessions/getWebsiteSession.ts` | selects `ip` (Postgres path) |
+| `src/queries/sql/sessions/getWebsiteSessions.ts` | selects `ip`, adds it to the search predicate |
+| `src/queries/sql/reports/getRevenueSessions.ts` | same — it feeds the same table component |
 | `src/components/messages.ts`, `public/intl/messages/en-US.json` | `label.ip-address` |
-| `.../sessions/SessionInfo.tsx` | renders the IP field |
+| `.../sessions/SessionInfo.tsx` | renders the IP field in the detail panel |
+| `.../sessions/SessionsTable.tsx` | IP column in the sessions list |
 
 `VARCHAR(45)` is the maximum length of an IPv4-mapped IPv6 literal, so every address
 form Umami can produce fits.
@@ -74,9 +78,8 @@ only when you trust every hop that can append to it.
   this code path never runs.
 - **Existing sessions show `—`.** The column is backfilled with `NULL`; only sessions
   created after the migration have an IP.
-- **The sessions *list* is unchanged.** Only the detail panel shows the IP. Adding a
-  column to `SessionsTable.tsx` needs the same two-line addition to
-  `getWebsiteSessions.ts`.
+- **Search is a substring match** (`ilike '%…%'`), so `203.0.113` matches every session
+  in that /24, but there is no CIDR or range matching.
 - Storing IPs makes the database hold personal data under GDPR/CCPA. That is a change in
   the legal character of the deployment, not just a feature — set retention and access
   accordingly, and update your privacy notice.

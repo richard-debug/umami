@@ -29,7 +29,8 @@ async function relationalQuery(websiteId: string, currency: string, filters: Que
     ? `and (session.browser ilike {{search}}
            or session.os ilike {{search}}
            or session.device ilike {{search}}
-           or session.city ilike {{search}})`
+           or session.city ilike {{search}}
+           or session.ip ilike {{search}})`
     : '';
 
   return pagedRawQuery(
@@ -46,6 +47,7 @@ async function relationalQuery(websiteId: string, currency: string, filters: Que
       session.country,
       session.region,
       session.city,
+      session.ip,
       min(website_event.created_at) as "firstAt",
       max(website_event.created_at) as "lastAt",
       count(distinct website_event.visit_id) as "visits",
@@ -80,7 +82,8 @@ async function relationalQuery(websiteId: string, currency: string, filters: Que
       session.language,
       session.country,
       session.region,
-      session.city
+      session.city,
+      session.ip
     order by max(website_event.created_at) desc
     `,
     queryParams,

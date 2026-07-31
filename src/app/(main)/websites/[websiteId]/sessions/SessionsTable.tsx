@@ -37,6 +37,9 @@ export function SessionsTable({
           </TypeIcon>
         )}
       </DataColumn>
+      <DataColumn id="ip" label={t(labels.ipAddress)} width="160px">
+        {(row: any) => row.ip || '—'}
+      </DataColumn>
       <DataColumn id="browser" label={t(labels.browser)} width="140px">
         {(row: any) => (
           <TypeIcon type="browser" value={row.browser}>
