@@ -1,3 +1,4 @@
+import { getBlocklist } from '@/lib/blocklist';
 import { parseRequest } from '@/lib/request';
 import { json, unauthorized } from '@/lib/response';
 import { canViewWebsiteSection } from '@/permissions';
@@ -28,5 +29,11 @@ export async function GET(
 
   const data = await getWebsiteSession(websiteId, sessionId);
 
-  return json(data);
+  if (!data) {
+    return json(data);
+  }
+
+  const blocklist = await getBlocklist();
+
+  return json({ ...data, blocklist: blocklist.check(data.ip) });
 }

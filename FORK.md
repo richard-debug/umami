@@ -84,6 +84,31 @@ reissued with one.
 The token holds `hash(ip)` rather than the address itself: it is a plain signed JWT, so
 its payload is readable by anything that sees it.
 
+## Blocklist status
+
+Sessions whose IP appears on a configured blocklist are flagged in both the detail panel
+and the sessions list. Hovering the flag names the lists that matched.
+
+`src/lib/blocklist.ts` downloads whole feeds and matches locally, rather than querying a
+reputation API per address. That means **no visitor IP is ever sent to a third party**, no
+API key is needed, and there is no per-visitor network call — which matters given the rest
+of this fork is about handling IPs carefully.
+
+Feeds are plain text, one entry per line, mixing bare addresses with CIDR ranges and IPv4
+with IPv6; comments and malformed lines are skipped. Most public lists already use this
+format, so `https://iplists.firehol.org/`, `stamparm/ipsum` and `blocklist.de` all work
+unchanged. The default is the [USTC list](https://blackip.ustc.edu.cn/intro.php), which
+aggregates Spamhaus, Talos and Feodo Tracker — about 12,700 entries, 4,700 of them ranges.
+
+Feeds are cached in module-global state for 6 hours. A failed refresh keeps serving the
+previous copy instead of silently reporting every address as clean, and retries after 5
+minutes rather than on every request.
+
+**Read the flag as a signal, not a verdict.** These lists target mail abuse, botnet C2 and
+scanning infrastructure — not general web browsing. A visitor on CGNAT, a VPN exit or a
+recycled cloud IP can be flagged without having done anything. Treat it as a prompt to
+look closer.
+
 ## Configuration
 
 | Variable | Effect |
@@ -91,6 +116,8 @@ its payload is readable by anything that sees it.
 | `CLIENT_IP_HEADER` | Pin IP resolution to one header. **Set this to `cf-connecting-ip` behind Cloudflare** — see below. |
 | `DISABLE_CLIENT_IP` | Set to `1` to stop persisting IPs. Everything else keeps working; the field renders as `—`. |
 | `IGNORE_IP` | Unchanged upstream behaviour — comma-separated IPs/CIDRs to drop entirely. |
+| `IP_BLOCKLIST_URLS` | Comma-separated feed URLs. Defaults to the USTC list. |
+| `DISABLE_IP_BLOCKLIST` | Set to `1` to skip blocklist loading entirely — no fetch, nothing flagged. |
 
 ## Behind Cloudflare
 
@@ -207,18 +234,61 @@ Either way:
 - Keep the Cloudflare proxy (orange cloud) on, and keep Dokploy's Traefik router in front
   — `CF-Connecting-IP` passes through untouched.
 
-### Rebasing on upstream
+## Taking a new upstream release
+
+This fork is a small patch that lives on the `feat/session-ip` branch. Keeping it current
+means replaying that patch on top of newer upstream code — rebase, not merge, so the branch
+stays a readable set of commits rather than accumulating merge bubbles.
+
+One-time setup:
 
 ```bash
 git remote add upstream https://github.com/umami-software/umami.git
-git fetch upstream
-git rebase upstream/master
 ```
 
-Expect conflicts mainly in `src/app/api/send/route.ts`, which upstream touches often and
-which holds most of this patch's logic. The rest are one-line insertions into lists
-(`messages.ts`, `constants.ts`, `en-US.json`, `schema.prisma`) that usually auto-merge, or
-low-churn query files where the resolution is "add `ip` back to the select and group by".
+Each time you want a newer upstream:
+
+```bash
+git fetch upstream --tags
+git checkout feat/session-ip
+git rebase v3.3.0          # or upstream/master to track the tip
+```
+
+Releases are safer than `master`: tags are what upstream builds their own images from.
+
+Resolve any conflicts, then **run the checks before pushing** — they are the whole point of
+the tests in this fork:
+
+```bash
+pnpm install               # lockfile may have moved
+pnpm exec prisma generate  # schema may have moved
+pnpm exec tsc --noEmit
+pnpm test
+```
+
+`src/app/api/send/route.test.ts` and `src/lib/blocklist.test.ts` cover the parts most likely
+to break silently in a rebase — the IP trust rules, the cached-session refresh, and feed
+matching. If they pass, the patch survived.
+
+Then:
+
+```bash
+git push --force-with-lease fork feat/session-ip
+```
+
+which triggers `fork-image.yml` and publishes a new multi-arch image. Redeploy in Dokploy
+against the new `sha-` tag.
+
+### What to look at during a rebase
+
+| Area | Why |
+| --- | --- |
+| `src/app/api/send/route.ts` | Highest-churn file upstream, and holds most of this patch. Check `getSessionIp()` and the `cache.ipHash` guard survived intact. |
+| `createSession.ts` | Upstream edits the insert column list a few times a year. `ip` must stay in the column list, the values list, and the `on conflict` clause. |
+| `getWebsiteSession(s).ts`, `getRevenueSessions.ts` | If upstream adds or removes a session column, `ip` must stay in both the select and the `group by`. |
+| `prisma/schema.prisma` | Keep the `ip` field on `Session`. If upstream ever adds their own IP column, drop ours and migrate rather than carrying both. |
+| `messages.ts`, `en-US.json`, `constants.ts` | One-line list insertions; conflicts here resolve to "keep both". |
+| `.github/workflows/fork-image.yml` | Fork-only file — should never conflict. If it does, upstream added a file of the same name. |
 
 The migration directory is deliberately named `fork_add_session_ip` rather than taking the
 next number. Upstream adds roughly two dozen migrations a year, so any number we picked
@@ -226,3 +296,8 @@ would eventually collide; a letter prefix sorts after every numeric one and can 
 clash. **Do not rename it once it has been applied** — Prisma keys `_prisma_migrations` on
 the directory name, so a rename makes it look unapplied and the re-run of
 `ADD COLUMN "ip"` fails the deploy.
+
+New upstream migrations apply on the next container start, in the same
+`prisma migrate deploy` run. Take a database snapshot in Dokploy before deploying a major
+upstream jump — the fork's own migration is trivially reversible (`ALTER TABLE "session"
+DROP COLUMN "ip"`), but upstream's may not be.

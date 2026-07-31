@@ -235,6 +235,7 @@ export const labels: Record<string, string> = {
   region: 'label.region',
   city: 'label.city',
   ipAddress: 'label.ip-address',
+  blocklisted: 'label.blocklisted',
   browser: 'label.browser',
   device: 'label.device',
   pageTitle: 'label.pageTitle',

@@ -1,4 +1,4 @@
-import { Column, Grid, Icon, Label, Row } from '@umami/react-zen';
+import { Column, Grid, Icon, Label, Row, StatusLight } from '@umami/react-zen';
 import type { ReactNode } from 'react';
 import { DateDistance } from '@/components/common/DateDistance';
 import { TypeIcon } from '@/components/common/TypeIcon';
@@ -40,7 +40,16 @@ export function SessionInfo({ data }) {
       </Info>
 
       <Info label={t(labels.ipAddress)} icon={<Network />}>
-        {data?.ip && <span style={{ overflowWrap: 'anywhere' }}>{data.ip}</span>}
+        {data?.ip && (
+          <Column gap="1">
+            <span style={{ overflowWrap: 'anywhere' }}>{data.ip}</span>
+            {data?.blocklist?.length > 0 && (
+              <StatusLight variant="error">
+                <span title={data.blocklist.join(', ')}>{t(labels.blocklisted)}</span>
+              </StatusLight>
+            )}
+          </Column>
+        )}
       </Info>
 
       <Info label={t(labels.browser)} icon={<TypeIcon type="browser" value={data?.browser} />}>

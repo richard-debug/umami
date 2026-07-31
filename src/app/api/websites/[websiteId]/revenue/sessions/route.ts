@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { getBlocklist } from '@/lib/blocklist';
 import { getQueryFilters, parseRequest } from '@/lib/request';
 import { json, unauthorized } from '@/lib/response';
 import { filterParams, pagingParams, searchParams, withDateRange } from '@/lib/schema';
@@ -33,5 +34,10 @@ export async function GET(
 
   const data = await getRevenueSessions(websiteId, currency, filters);
 
-  return json(data);
+  const blocklist = await getBlocklist();
+
+  return json({
+    ...data,
+    data: data?.data?.map(row => ({ ...row, blocklist: blocklist.check(row.ip) })),
+  });
 }

@@ -1,9 +1,25 @@
-import { DataColumn, DataTable, type DataTableProps } from '@umami/react-zen';
+import { DataColumn, DataTable, type DataTableProps, StatusLight } from '@umami/react-zen';
 import { Avatar } from '@/components/common/Avatar';
 import { DateDistance } from '@/components/common/DateDistance';
 import Link from '@/components/common/Link';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useMessages } from '@/components/hooks';
+
+function IpCell({ ip, blocklist }: { ip?: string; blocklist?: string[] }) {
+  if (!ip) {
+    return '—';
+  }
+
+  if (!blocklist?.length) {
+    return ip;
+  }
+
+  return (
+    <StatusLight variant="error">
+      <span title={blocklist.join(', ')}>{ip}</span>
+    </StatusLight>
+  );
+}
 
 export function SessionsTable({
   websiteId,
@@ -37,8 +53,8 @@ export function SessionsTable({
           </TypeIcon>
         )}
       </DataColumn>
-      <DataColumn id="ip" label={t(labels.ipAddress)} width="160px">
-        {(row: any) => row.ip || '—'}
+      <DataColumn id="ip" label={t(labels.ipAddress)} width="180px">
+        {(row: any) => <IpCell ip={row.ip} blocklist={row.blocklist} />}
       </DataColumn>
       <DataColumn id="browser" label={t(labels.browser)} width="140px">
         {(row: any) => (
