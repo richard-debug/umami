@@ -171,8 +171,32 @@ volumes:
 The build pulls the GeoLite2 City database from a public mirror; no MaxMind licence key
 is required.
 
-**Option B — build in CI.** Push a GHCR image from a GitHub Actions workflow on this
-fork and change only the `image:` line of the existing template.
+**Option B — build in CI.** `.github/workflows/fork-image.yml` builds this fork and pushes
+it to GHCR; the Dokploy template then needs only its `image:` line changed.
+
+Upstream's `cd.yml` is not reusable here: it runs on a self-hosted Blacksmith runner, and
+its non-tag path would produce `…/umami:feat/session-ip`, which is not a valid image tag.
+The fork workflow is a separate file so rebases never conflict with it, and it is guarded
+with `if: github.repository != 'umami-software/umami'`.
+
+It runs on push to `feat/session-ip` and on manual dispatch, and pushes three tags:
+
+| Tag | Use |
+| --- | --- |
+| `ghcr.io/<owner>/umami:sha-<short>` | what to pin in Dokploy — immutable |
+| `ghcr.io/<owner>/umami:feat-session-ip` | current head of the branch |
+| `ghcr.io/<owner>/umami:latest` | convenience; moves on every build |
+
+Three things need doing once, by hand:
+
+1. **Enable Actions on the fork.** GitHub disables workflows on forks by default — open the
+   Actions tab and confirm before the first run.
+2. **Decide the package visibility.** GHCR packages start private. Either make it public
+   (package settings → change visibility) or add a registry credential in Dokploy using a
+   PAT with `read:packages`. A private package with no credential fails the pull.
+3. **Pick the architecture.** The workflow defaults to `linux/amd64`, which is what almost
+   every VPS running Dokploy uses. If your host is arm64, dispatch it manually and choose
+   the platform — arm64 is emulated through QEMU and the build takes substantially longer.
 
 Either way:
 
