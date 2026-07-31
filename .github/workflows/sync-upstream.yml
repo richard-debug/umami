@@ -98,12 +98,7 @@ jobs:
           TAG='${{ steps.upstream.outputs.tag }}'
           TITLE="Upstream $TAG needs a manual rebase"
 
-          if [ -n "$(gh issue list --search "$TITLE in:title" --state open --json number -q '.[].number')" ]; then
-            echo "Issue already open." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          gh issue create --title "$TITLE" --body "$(cat <<BODY
+          REPORT=$(cat <<BODY
           Rebasing \`$BRANCH\` onto upstream \`$TAG\` hit conflicts, so nothing was pushed.
 
           Conflicting paths:
@@ -124,7 +119,20 @@ jobs:
           git push --force-with-lease origin $BRANCH
           \`\`\`
           BODY
-          )"
+          )
+
+          echo "## $TITLE" >> "$GITHUB_STEP_SUMMARY"
+          echo "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+          # An issue is the nicer signal but forks have issues disabled by default, so it is
+          # best-effort. The failed run is what actually notifies.
+          if [ "$(gh repo view --json hasIssuesEnabled -q .hasIssuesEnabled)" = 'true' ] \
+            && [ -z "$(gh issue list --search "$TITLE in:title" --state open --json number -q '.[].number')" ]; then
+            gh issue create --title "$TITLE" --body "$REPORT" || true
+          fi
+
+          # Fail loudly rather than reporting a green run that quietly did nothing.
+          exit 1
 
       - uses: pnpm/action-setup@v4
         if: steps.rebase.outputs.ok == 'true'

@@ -265,14 +265,20 @@ is not a decision a schedule should make. Merging the PR pushes `feat/session-ip
 builds a new image. Nothing redeploys on its own — you still repoint Dokploy at the new
 `sha-` tag.
 
-Two one-time repository settings are required, both off by default:
+### Repository prerequisites
 
-1. **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create
-   and approve pull requests."** Without it the final step fails.
-2. **Scheduled workflows are individually disabled in forks**, and are auto-disabled again
-   after 60 days of repository inactivity. Confirm on the Actions tab that the schedule is
-   enabled; until then, run it from the "Run workflow" button. It is worth dispatching once
-   manually to check the whole path works.
+`schedule` and `workflow_dispatch` only ever fire from a repository's **default branch**.
+That is why this fork's default is `feat/session-ip` and not `master` — on `master` the sync
+workflow would silently never run, and would not even appear in the Actions UI.
+
+- **"Allow GitHub Actions to create and approve pull requests"** (Settings → Actions →
+  General) must stay on, or the final step cannot open the PR. Already enabled here.
+- **Scheduled workflows are auto-disabled after 60 days of repository inactivity**, and are
+  disabled by default in forks. Check the Actions tab if a week passes with no run.
+- **Issues are disabled on this fork**, as they are on all forks by default. The conflict
+  path therefore writes its report to the run summary and fails the run — a red run is the
+  notification. Turning issues on additionally gets you a tracked issue with the same
+  content; the workflow detects this and adapts.
 
 ### Doing it by hand
 
