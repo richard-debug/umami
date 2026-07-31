@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { startOfHour } from 'date-fns';
 import { isbot } from 'isbot';
 import { z } from 'zod';
@@ -74,12 +75,51 @@ const schema = z.object({
 });
 
 /**
+ * Whether this request demonstrably arrived through the deployment's own proxy.
+ *
+ * Forwarding headers are self-asserted. `cf-connecting-ip` is authoritative only on a
+ * request that actually transited Cloudflare — anyone who finds the origin address can
+ * connect to it directly and send whatever they like. Pinning `CLIENT_IP_HEADER` narrows
+ * which header is read; it does not establish that the proxy set it.
+ *
+ * `TRUSTED_PROXY_SECRET` closes that: `Header-Name: value`, where the proxy injects the
+ * header (a Cloudflare Transform Rule, for instance) and requests arriving without it are
+ * not believed. Without the secret the only remaining guarantee is network-level — the
+ * origin being unreachable except through the proxy — so we at least refuse to persist an
+ * address sourced from whichever of a dozen forgeable headers happened to be present.
+ */
+function isProxiedRequest(request: Request) {
+  const secret = process.env.TRUSTED_PROXY_SECRET;
+
+  if (!secret) {
+    // No proof available. Require the operator to have named their proxy's header rather
+    // than letting getIpAddress() walk the full candidate list for data we store.
+    return !!process.env.CLIENT_IP_HEADER;
+  }
+
+  const separator = secret.indexOf(':');
+
+  if (separator < 1) {
+    return false;
+  }
+
+  const expected = secret.slice(separator + 1).trim();
+  const actual = request.headers.get(secret.slice(0, separator).trim()) ?? '';
+
+  if (!expected || actual.length !== expected.length) {
+    return false;
+  }
+
+  return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+/**
  * The IP to persist on the session row.
  *
  * /api/send is unauthenticated, so a payload-supplied `ip` is caller-controlled and must
  * not be stored on the strength of the request alone — only an authenticated server-side
- * caller may assert a client IP on someone else's behalf. Everything else uses the address
- * resolved from the trusted proxy headers.
+ * caller may assert a client IP on someone else's behalf. A header-derived address is only
+ * stored when the request came through the proxy that is supposed to set it.
  *
  * This is deliberately narrower than the `ip` returned by getClientInfo(), which upstream
  * also feeds into the session hash and the geolocation lookup.
@@ -93,7 +133,7 @@ async function getSessionIp(request: Request, payloadIp?: string) {
     return (await checkAuth(request)) ? payloadIp : undefined;
   }
 
-  return getIpAddress(request.headers);
+  return isProxiedRequest(request) ? getIpAddress(request.headers) : undefined;
 }
 
 export async function POST(request: Request) {

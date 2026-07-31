@@ -36,12 +36,44 @@ address. `getSessionIp()` therefore applies a narrower rule than upstream's
 
 | Request | Stored |
 | --- | --- |
-| No `payload.ip` (normal tracker traffic) | `getIpAddress(request.headers)` |
+| Normal tracker traffic, through the declared proxy | `getIpAddress(request.headers)` |
 | `payload.ip` from an authenticated caller | `payload.ip` |
 | `payload.ip` from an unauthenticated caller | nothing |
+| Anything not demonstrably proxied (see below) | nothing |
 
 `checkAuth()` only runs when a `payload.ip` is actually present, so browser traffic never
 pays for the extra lookup.
+
+### Proving the request came through your proxy
+
+Forwarding headers are self-asserted. `cf-connecting-ip` is authoritative only on a request
+that actually transited Cloudflare — anyone who discovers the origin address can connect to
+it directly and send any value they like, which would otherwise land straight in the stored
+IP and its blocklist status. Setting `CLIENT_IP_HEADER` narrows *which* header is read; it
+does not establish that Cloudflare set it.
+
+There are three levels here, and it is worth knowing which one you are on:
+
+1. **Nothing declared.** No IP is persisted at all. `getIpAddress()` would otherwise fall
+   back through a dozen candidate headers, any of which a client can set, which is not a
+   defensible source for stored data.
+2. **`CLIENT_IP_HEADER` set.** The named header is used. This rests entirely on the origin
+   being unreachable except through the proxy. On Dokploy that means firewalling the host so
+   only [Cloudflare's ranges](https://www.cloudflare.com/ips/) can reach 80/443, or turning
+   on Authenticated Origin Pulls. Without one of those, a direct request to the origin still
+   wins.
+3. **`TRUSTED_PROXY_SECRET` set**, as `Header-Name: value`. The header must be present and
+   match, compared in constant time, before any header-derived address is stored. Add it in
+   Cloudflare with Rules → Transform Rules → Modify Request Header → *Set static*, using a
+   long random value. This holds even if the origin is directly reachable, so it is the one
+   to use if you cannot firewall the host.
+
+A malformed `TRUSTED_PROXY_SECRET` — no colon, or an empty value — is treated as a failure
+to verify, not as an absent setting, so a typo cannot silently reopen the gap.
+
+None of this changes the `ip` upstream folds into the session hash and the geolocation
+lookup; those keep upstream's behaviour, so a forged header can still shift a visitor's
+reported country. Only the stored, displayed address is held to this standard.
 
 The stored IP can therefore differ from the one upstream folds into the session hash and
 the geolocation lookup. Those remain upstream's behaviour and are still influenced by a
@@ -131,7 +163,8 @@ look closer.
 
 | Variable | Effect |
 | --- | --- |
-| `CLIENT_IP_HEADER` | Pin IP resolution to one header. **Set this to `cf-connecting-ip` behind Cloudflare** — see below. |
+| `CLIENT_IP_HEADER` | Pin IP resolution to one header. **Required for any IP to be stored. Set it to `cf-connecting-ip` behind Cloudflare** — see below. |
+| `TRUSTED_PROXY_SECRET` | `Header-Name: value` that your proxy injects. When set, header-derived IPs are stored only if it matches. |
 | `DISABLE_CLIENT_IP` | Set to `1` to stop persisting IPs. Everything else keeps working; the field renders as `—`. |
 | `IGNORE_IP` | Unchanged upstream behaviour — comma-separated IPs/CIDRs to drop entirely. |
 | `IP_BLOCKLIST_URLS` | Comma-separated `name=url` (or bare URL) feeds. Defaults to firehol + ipsum + ustc. |
@@ -186,6 +219,9 @@ services:
       DATABASE_TYPE: postgresql
       APP_SECRET: <keep the value your existing deployment already uses>
       CLIENT_IP_HEADER: cf-connecting-ip
+      # Recommended unless the origin is firewalled to Cloudflare's ranges. Must match a
+      # Cloudflare Transform Rule that sets the same header.
+      TRUSTED_PROXY_SECRET: 'x-origin-token: <long random value>'
     depends_on:
       db:
         condition: service_healthy

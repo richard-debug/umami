@@ -74,7 +74,10 @@ const storedIp = () => createSessionMock.mock.calls[0][0].ip;
 
 beforeEach(() => {
   process.env.APP_SECRET = 'test-secret';
+  // Named header = the operator has declared their proxy; see isProxiedRequest().
+  process.env.CLIENT_IP_HEADER = 'cf-connecting-ip';
   delete process.env.DISABLE_CLIENT_IP;
+  delete process.env.TRUSTED_PROXY_SECRET;
   parseRequestMock.mockReset();
   createSessionMock.mockReset();
   checkAuthMock.mockReset();
@@ -113,6 +116,62 @@ describe('persisted session IP', () => {
 
   test('stores nothing when DISABLE_CLIENT_IP is set', async () => {
     process.env.DISABLE_CLIENT_IP = '1';
+
+    await send({});
+
+    expect(storedIp()).toBeUndefined();
+  });
+});
+
+describe('proxy trust', () => {
+  test('stores nothing when no proxy header has been declared', async () => {
+    // Otherwise getIpAddress() would walk a dozen headers any client can set.
+    delete process.env.CLIENT_IP_HEADER;
+
+    await send({});
+
+    expect(storedIp()).toBeUndefined();
+  });
+
+  test('requires the shared secret once one is configured', async () => {
+    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+
+    await send({});
+
+    expect(storedIp()).toBeUndefined();
+  });
+
+  test('stores the IP when the secret matches', async () => {
+    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+
+    await send({ headers: { 'x-origin-token': 's3cret' } });
+
+    expect(storedIp()).toBe(REAL_IP);
+  });
+
+  test('rejects a wrong or truncated secret', async () => {
+    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+
+    await send({ headers: { 'x-origin-token': 'wrong!' } });
+    expect(storedIp()).toBeUndefined();
+
+    createSessionMock.mockReset();
+
+    await send({ headers: { 'x-origin-token': 's3cre' } });
+    expect(storedIp()).toBeUndefined();
+  });
+
+  test('a forged forwarding header alone is not enough', async () => {
+    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+
+    // Direct-to-origin request impersonating Cloudflare.
+    await send({ headers: { 'cf-connecting-ip': '198.51.100.7' } });
+
+    expect(storedIp()).toBeUndefined();
+  });
+
+  test('ignores a malformed secret setting rather than trusting everything', async () => {
+    process.env.TRUSTED_PROXY_SECRET = 'no-colon-here';
 
     await send({});
 
