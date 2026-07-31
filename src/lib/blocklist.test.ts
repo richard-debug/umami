@@ -106,6 +106,39 @@ describe('matching', () => {
     expect(blocklist.sources).toEqual(['lists.example.com', 'other.example.org']);
     expect(blocklist.check('1.12.221.155')).toEqual(['lists.example.com', 'other.example.org']);
   });
+
+  test('labels feeds by name when given as name=url', async () => {
+    // Two feeds on one host would otherwise collide under a hostname-derived name.
+    process.env.IP_BLOCKLIST_URLS =
+      'firehol=https://raw.example.com/a.netset,ipsum=https://raw.example.com/b.txt';
+
+    const blocklist = await getBlocklist();
+
+    expect(blocklist.sources).toEqual(['firehol', 'ipsum']);
+    expect(blocklist.check('1.12.221.155')).toEqual(['firehol', 'ipsum']);
+  });
+
+  test('never flags a non-public address', async () => {
+    // FireHOL level1 and similar firewall feeds list these deliberately.
+    process.env.IP_BLOCKLIST_URLS = 'bogons=https://lists.example.com/bogons.txt';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response('10.0.0.0/8\n127.0.0.0/8\n100.64.0.0/10\n192.168.0.0/16\nfd00::/8', {
+            status: 200,
+          }),
+      ),
+    );
+
+    const blocklist = await getBlocklist();
+
+    expect(blocklist.check('10.1.2.3')).toEqual([]);
+    expect(blocklist.check('127.0.0.1')).toEqual([]);
+    expect(blocklist.check('100.64.0.1')).toEqual([]);
+    expect(blocklist.check('192.168.1.1')).toEqual([]);
+    expect(blocklist.check('fd00::1')).toEqual([]);
+  });
 });
 
 describe('failure and opt-out', () => {

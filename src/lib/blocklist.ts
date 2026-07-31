@@ -1,7 +1,20 @@
 import ipaddr from 'ipaddr.js';
 
 const CACHE_KEY = 'ip-blocklist';
-const DEFAULT_URLS = 'https://blackip.ustc.edu.cn/list.php?txt';
+/**
+ * Three complementary feeds, so a flag can be corroborated rather than resting on one
+ * source — the UI names whichever matched.
+ *
+ *  - FireHOL level1: conservative aggregate (includes Spamhaus DROP), near-zero false
+ *    positives, mostly ranges.
+ *  - ipsum level 3: addresses appearing on at least three independent blocklists.
+ *  - USTC: aggregates Spamhaus, Talos and Feodo Tracker.
+ */
+const DEFAULT_URLS = [
+  'firehol=https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset',
+  'ipsum=https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt',
+  'ustc=https://blackip.ustc.edu.cn/list.php?txt',
+].join(',');
 const REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
 const RETRY_INTERVAL = 5 * 60 * 1000;
 const FETCH_TIMEOUT = 20000;
@@ -39,15 +52,32 @@ function getUrls() {
 
   return (process.env.IP_BLOCKLIST_URLS ?? DEFAULT_URLS)
     .split(',')
-    .map(url => url.trim())
-    .filter(Boolean);
+    .map(entry => entry.trim())
+    .filter(Boolean)
+    .map(parseEntry);
 }
 
-function sourceName(url: string) {
+/**
+ * Each configured entry is either a bare URL or `name=url`. The explicit form matters
+ * because two feeds can share a host — FireHOL and ipsum are both on raw.githubusercontent
+ * — and the name is what the UI shows against a flagged address.
+ */
+function parseEntry(entry: string) {
+  const separator = entry.indexOf('=');
+
+  if (separator > 0) {
+    const name = entry.slice(0, separator);
+
+    // Only treat it as a label if it could not be part of a URL or query string.
+    if (/^[\w.-]+$/.test(name)) {
+      return { name, url: entry.slice(separator + 1) };
+    }
+  }
+
   try {
-    return new URL(url).hostname;
+    return { name: new URL(entry).hostname, url: entry };
   } catch {
-    return url;
+    return { name: entry, url: entry };
   }
 }
 
@@ -85,7 +115,7 @@ export function parseBlocklist(name: string, text: string): Source {
   return source;
 }
 
-async function fetchSource(url: string): Promise<Source | null> {
+async function fetchSource({ name, url }: { name: string; url: string }): Promise<Source | null> {
   try {
     const response = await fetch(url, {
       cache: 'no-store',
@@ -96,7 +126,7 @@ async function fetchSource(url: string): Promise<Source | null> {
       return null;
     }
 
-    return parseBlocklist(sourceName(url), await response.text());
+    return parseBlocklist(name, await response.text());
   } catch {
     return null;
   }
@@ -124,6 +154,14 @@ function build(sources: Source[]): Blocklist {
       try {
         address = ipaddr.parse(ip);
       } catch {
+        return [];
+      }
+
+      // Feeds built for firewall ingress filtering (FireHOL level1, for one) list bogons
+      // such as 10/8, 127/8 and 100.64/10 alongside genuinely hostile addresses. Blocking
+      // those at a firewall is correct; labelling a visitor with one as hostile is not, so
+      // anything that is not publicly routable is never flagged.
+      if (address.range() !== 'unicast') {
         return [];
       }
 

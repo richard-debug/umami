@@ -95,14 +95,32 @@ API key is needed, and there is no per-visitor network call — which matters gi
 of this fork is about handling IPs carefully.
 
 Feeds are plain text, one entry per line, mixing bare addresses with CIDR ranges and IPv4
-with IPv6; comments and malformed lines are skipped. Most public lists already use this
-format, so `https://iplists.firehol.org/`, `stamparm/ipsum` and `blocklist.de` all work
-unchanged. The default is the [USTC list](https://blackip.ustc.edu.cn/intro.php), which
-aggregates Spamhaus, Talos and Feodo Tracker — about 12,700 entries, 4,700 of them ranges.
+with IPv6; comments and malformed lines are skipped. Nearly every public list uses this
+format. Three are configured by default, so a flag can be corroborated rather than resting
+on a single source — the UI names whichever matched:
+
+| Feed | Entries | What it is |
+| --- | --- | --- |
+| `firehol` | ~4,600 | Conservative aggregate incl. Spamhaus DROP. Near-zero false positives, mostly ranges. |
+| `ipsum` | ~16,100 | Addresses appearing on at least three independent blocklists. |
+| `ustc` | ~12,700 | Aggregates Spamhaus, Talos and Feodo Tracker. |
+
+Entries are `name=url` or a bare URL (the name then falls back to the hostname). The
+explicit form matters because feeds can share a host — FireHOL and ipsum are both on
+`raw.githubusercontent.com`. Other drop-in options: `blocklist.de/lists/all.txt`
+(~23,000, SSH/mail brute force), `cinsscore.com/list/ci-badguys.txt` (~15,000), and
+`rules.emergingthreats.net/blockrules/compromised-ips.txt` (~600, small and high
+confidence). Spamhaus DROP is *not* drop-in — it is JSON now, not line-oriented.
 
 Feeds are cached in module-global state for 6 hours. A failed refresh keeps serving the
 previous copy instead of silently reporting every address as clean, and retries after 5
-minutes rather than on every request.
+minutes rather than on every request. All three load in about 3 seconds; a lookup costs
+roughly 210µs, so a 50-row sessions page adds about 10ms.
+
+Addresses that are not publicly routable are never flagged, whatever the feeds say. Lists
+built for firewall ingress filtering — FireHOL level1 among them — deliberately include
+`10/8`, `127/8`, `192.168/16` and the `100.64/10` CGNAT range. Blocking those at a firewall
+is correct; labelling a visitor carrying one as hostile is not.
 
 **Read the flag as a signal, not a verdict.** These lists target mail abuse, botnet C2 and
 scanning infrastructure — not general web browsing. A visitor on CGNAT, a VPN exit or a
@@ -116,7 +134,7 @@ look closer.
 | `CLIENT_IP_HEADER` | Pin IP resolution to one header. **Set this to `cf-connecting-ip` behind Cloudflare** — see below. |
 | `DISABLE_CLIENT_IP` | Set to `1` to stop persisting IPs. Everything else keeps working; the field renders as `—`. |
 | `IGNORE_IP` | Unchanged upstream behaviour — comma-separated IPs/CIDRs to drop entirely. |
-| `IP_BLOCKLIST_URLS` | Comma-separated feed URLs. Defaults to the USTC list. |
+| `IP_BLOCKLIST_URLS` | Comma-separated `name=url` (or bare URL) feeds. Defaults to firehol + ipsum + ustc. |
 | `DISABLE_IP_BLOCKLIST` | Set to `1` to skip blocklist loading entirely — no fetch, nothing flagged. |
 
 ## Behind Cloudflare
@@ -236,9 +254,27 @@ Either way:
 
 ## Taking a new upstream release
 
-This fork is a small patch that lives on the `feat/session-ip` branch. Keeping it current
-means replaying that patch on top of newer upstream code — rebase, not merge, so the branch
-stays a readable set of commits rather than accumulating merge bubbles.
+`.github/workflows/sync-upstream.yml` does this for you. Weekly (and on demand) it resolves
+upstream's latest release, replays this fork's patch onto it, runs `tsc` and the full test
+suite, and **opens a pull request** — as a draft if the checks failed. If the rebase
+conflicts it pushes nothing and opens an issue listing the conflicting paths.
+
+It opens a PR rather than force-pushing `feat/session-ip` on purpose: an automated rebase
+rewrites history, and doing that unannounced to the branch the deployed image is built from
+is not a decision a schedule should make. Merging the PR pushes `feat/session-ip`, which
+builds a new image. Nothing redeploys on its own — you still repoint Dokploy at the new
+`sha-` tag.
+
+Two one-time repository settings are required, both off by default:
+
+1. **Settings → Actions → General → Workflow permissions → "Allow GitHub Actions to create
+   and approve pull requests."** Without it the final step fails.
+2. **Scheduled workflows are individually disabled in forks**, and are auto-disabled again
+   after 60 days of repository inactivity. Confirm on the Actions tab that the schedule is
+   enabled; until then, run it from the "Run workflow" button. It is worth dispatching once
+   manually to check the whole path works.
+
+### Doing it by hand
 
 One-time setup:
 

@@ -1,0 +1,196 @@
+# Fork-only: replay this fork's patch onto the newest upstream release.
+#
+# Deliberately opens a pull request rather than force-pushing feat/session-ip. An automated
+# rebase rewrites history, and doing that unannounced to the branch the deployed image is
+# built from is not something a schedule should decide on its own.
+name: Sync with upstream release
+
+on:
+  schedule:
+    # Weekly. Upstream tags releases far less often than daily.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Upstream tag to rebase onto (default: latest release)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  BRANCH: feat/session-ip
+  UPSTREAM_REPO: umami-software/umami
+  GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  sync:
+    if: github.repository != 'umami-software/umami'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/session-ip
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Resolve upstream release
+        id: upstream
+        run: |
+          set -euo pipefail
+
+          TAG='${{ inputs.tag }}'
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "$UPSTREAM_REPO" --json tagName -q .tagName)
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sync_branch=auto/upstream-$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream release: $TAG"
+
+          git remote add upstream "https://github.com/$UPSTREAM_REPO.git"
+          git fetch --no-tags upstream "refs/tags/$TAG:refs/tags/$TAG"
+
+          # Already rebased onto this tag? Then there is nothing to do.
+          if git merge-base --is-ancestor "$TAG" HEAD; then
+            echo "state=current" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(gh pr list --head "auto/upstream-$TAG" --state open --json number -q '.[].number')" ]; then
+            echo "state=pr-open" >> "$GITHUB_OUTPUT"
+          else
+            echo "state=needed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nothing to do
+        if: steps.upstream.outputs.state != 'needed'
+        run: |
+          echo "No action for ${{ steps.upstream.outputs.tag }} (${{ steps.upstream.outputs.state }})." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rebase onto the release
+        id: rebase
+        if: steps.upstream.outputs.state == 'needed'
+        run: |
+          git checkout -b '${{ steps.upstream.outputs.sync_branch }}'
+
+          if git rebase '${{ steps.upstream.outputs.tag }}'; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            # Capture the conflicting paths before unwinding the rebase.
+            {
+              echo 'conflicts<<EOF'
+              git diff --name-only --diff-filter=U
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+            git rebase --abort
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report conflicts and stop
+        if: steps.rebase.outputs.ok == 'false'
+        run: |
+          TAG='${{ steps.upstream.outputs.tag }}'
+          TITLE="Upstream $TAG needs a manual rebase"
+
+          if [ -n "$(gh issue list --search "$TITLE in:title" --state open --json number -q '.[].number')" ]; then
+            echo "Issue already open." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          gh issue create --title "$TITLE" --body "$(cat <<BODY
+          Rebasing \`$BRANCH\` onto upstream \`$TAG\` hit conflicts, so nothing was pushed.
+
+          Conflicting paths:
+
+          \`\`\`
+          ${{ steps.rebase.outputs.conflicts }}
+          \`\`\`
+
+          Resolve locally — \`FORK.md\` has a table of what each file's resolution should be:
+
+          \`\`\`bash
+          git fetch upstream --tags
+          git checkout $BRANCH
+          git rebase $TAG
+          # resolve, then:
+          pnpm install && pnpm exec prisma generate
+          pnpm exec tsc --noEmit && pnpm test
+          git push --force-with-lease origin $BRANCH
+          \`\`\`
+          BODY
+          )"
+
+      - uses: pnpm/action-setup@v4
+        if: steps.rebase.outputs.ok == 'true'
+        with:
+          version: 10.15.1
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        if: steps.rebase.outputs.ok == 'true'
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Verify the patch survived
+        id: verify
+        if: steps.rebase.outputs.ok == 'true'
+        continue-on-error: true
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/dummy
+          SKIP_DB_CHECK: 1
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile
+          pnpm exec prisma generate
+          pnpm exec tsc --noEmit
+          pnpm test
+
+      - name: Open a pull request
+        if: steps.rebase.outputs.ok == 'true'
+        run: |
+          set -euo pipefail
+
+          TAG='${{ steps.upstream.outputs.tag }}'
+          SYNC='${{ steps.upstream.outputs.sync_branch }}'
+          PASSED='${{ steps.verify.outcome }}'
+
+          # The sync branch is machine-owned and disposable, so a plain force is correct
+          # here; --force-with-lease would fail on a ref this clone has never fetched.
+          git push --force origin "$SYNC"
+
+          if [ "$PASSED" = 'success' ]; then
+            STATUS='Rebase applied cleanly and `tsc` plus the full test suite passed.'
+            DRAFT=''
+          else
+            STATUS='Rebase applied cleanly but **`tsc` or the tests failed** — see the run log. Do not merge until resolved.'
+            DRAFT='--draft'
+          fi
+
+          gh pr create $DRAFT \
+            --base "$BRANCH" \
+            --head "$SYNC" \
+            --title "Rebase onto upstream $TAG" \
+            --body "$(cat <<BODY
+          Replays this fork's patch onto upstream \`$TAG\`.
+
+          $STATUS
+
+          \`src/app/api/send/route.test.ts\` and \`src/lib/blocklist.test.ts\` are the regression
+          net for the parts a rebase breaks quietly — the IP trust rules, the cached-session
+          refresh, and blocklist matching.
+
+          Merging pushes \`$BRANCH\`, which rebuilds the multi-arch image. Repoint Dokploy at the
+          new \`sha-\` tag afterwards; nothing redeploys on its own.
+
+          Worth a look regardless of the test result: \`src/app/api/send/route.ts\` is upstream's
+          highest-churn file and holds most of this patch. \`FORK.md\` lists what each file's
+          resolution should be.
+          BODY
+          )"
