@@ -13,7 +13,7 @@ also searchable.
 | `prisma/schema.prisma` | `Session.ip String? @db.VarChar(45)` |
 | `prisma/migrations/21_add_session_ip/migration.sql` | `ALTER TABLE "session" ADD COLUMN "ip" VARCHAR(45)` |
 | `src/lib/constants.ts` | `FIELD_LENGTH.ip = 45` |
-| `src/app/api/send/route.ts` | passes the resolved client IP into `createSession` |
+| `src/app/api/send/route.ts` | resolves the IP to persist; refreshes it for cached sessions |
 | `src/queries/sql/sessions/createSession.ts` | writes `ip`; upserts it when it changes |
 | `src/queries/sql/sessions/getWebsiteSession.ts` | selects `ip` (Postgres path) |
 | `src/queries/sql/sessions/getWebsiteSessions.ts` | selects `ip`, adds it to the search predicate |
@@ -21,12 +21,33 @@ also searchable.
 | `src/components/messages.ts`, `public/intl/messages/en-US.json` | `label.ip-address` |
 | `.../sessions/SessionInfo.tsx` | renders the IP field in the detail panel |
 | `.../sessions/SessionsTable.tsx` | IP column in the sessions list |
+| `src/app/api/send/route.test.ts` | covers the trust rules and the cached-session refresh |
 
 `VARCHAR(45)` is the maximum length of an IPv4-mapped IPv6 literal, so every address
 form Umami can produce fits.
 
-The IP is resolved by the existing `getIpAddress()` helper — no new header parsing was
-added.
+### Which IP gets stored
+
+`/api/send` is unauthenticated and its Zod schema accepts a `payload.ip`, which upstream
+prefers over the request headers. That is fine for a value that only feeds a hash, but not
+for one this fork displays and makes searchable — any browser could POST an arbitrary
+address. `getSessionIp()` therefore applies a narrower rule than upstream's
+`getClientInfo()`:
+
+| Request | Stored |
+| --- | --- |
+| No `payload.ip` (normal tracker traffic) | `getIpAddress(request.headers)` |
+| `payload.ip` from an authenticated caller | `payload.ip` |
+| `payload.ip` from an unauthenticated caller | nothing |
+
+`checkAuth()` only runs when a `payload.ip` is actually present, so browser traffic never
+pays for the extra lookup.
+
+The stored IP can therefore differ from the one upstream folds into the session hash and
+the geolocation lookup. Those remain upstream's behaviour and are still influenced by a
+spoofed `payload.ip` — a visitor can still lie about their country. Only the displayed IP
+column is hardened here. A visitor can also suppress their own IP by sending a
+`payload.ip`; that is a deliberate trade against storing a value we cannot vouch for.
 
 ### Upsert behaviour
 
@@ -42,9 +63,26 @@ on conflict (session_id) do update
 For normal (anonymous) traffic this is a no-op: the session ID is *derived from* the IP,
 so a different IP already produces a different session row. It matters for sessions keyed
 by `distinctId` via the identify API, where one session persists across IP changes — those
-now show the most recently seen IP instead of being frozen at the first one. The `where`
+show the most recently seen IP instead of being frozen at the first one. The `where`
 clause means no row is written when the IP is unchanged, and a null IP never wipes a
 stored one.
+
+Reaching that upsert needs one more change. `createSession()` is skipped entirely when the
+request carries a valid `x-umami-cache` token, so on its own the clause above would only
+ever fire on a client's first request. The cache token now carries an `ipHash`, and the
+guard became:
+
+```ts
+if (!clickhouse.enabled && (!cache?.sessionId || cache.ipHash !== ipHash)) {
+```
+
+The comparison is against a signed token the server issued, so an unchanged IP costs
+nothing — no query, no write. A changed IP costs exactly one upsert. Tokens issued before
+this change have no `ipHash`, so they trigger a single backfilling write and are then
+reissued with one.
+
+The token holds `hash(ip)` rather than the address itself: it is a plain signed JWT, so
+its payload is readable by anything that sees it.
 
 ## Configuration
 

@@ -1,10 +1,12 @@
 import { startOfHour } from 'date-fns';
 import { isbot } from 'isbot';
 import { z } from 'zod';
+import { checkAuth } from '@/lib/auth';
 import clickhouse from '@/lib/clickhouse';
 import { CACHE_TOKEN_TYPE, COLLECTION_TYPE, EVENT_TYPE } from '@/lib/constants';
 import { getSalt, hash, secret, uuid } from '@/lib/crypto';
 import { getClientInfo, hasBlockedIp } from '@/lib/detect';
+import { getIpAddress } from '@/lib/ip';
 import { createToken, parseToken } from '@/lib/jwt';
 import { fetchWebsite } from '@/lib/load';
 import { parseRequest } from '@/lib/request';
@@ -18,6 +20,7 @@ interface Cache {
   sessionId: string;
   visitId: string;
   iat: number;
+  ipHash?: string;
 }
 
 // Reject strings whose first character is a spreadsheet formula trigger to
@@ -69,6 +72,29 @@ const schema = z.object({
       },
     ),
 });
+
+/**
+ * The IP to persist on the session row.
+ *
+ * /api/send is unauthenticated, so a payload-supplied `ip` is caller-controlled and must
+ * not be stored on the strength of the request alone — only an authenticated server-side
+ * caller may assert a client IP on someone else's behalf. Everything else uses the address
+ * resolved from the trusted proxy headers.
+ *
+ * This is deliberately narrower than the `ip` returned by getClientInfo(), which upstream
+ * also feeds into the session hash and the geolocation lookup.
+ */
+async function getSessionIp(request: Request, payloadIp?: string) {
+  if (process.env.DISABLE_CLIENT_IP) {
+    return undefined;
+  }
+
+  if (payloadIp) {
+    return (await checkAuth(request)) ? payloadIp : undefined;
+  }
+
+  return getIpAddress(request.headers);
+}
 
 export async function POST(request: Request) {
   try {
@@ -144,6 +170,8 @@ export async function POST(request: Request) {
       return forbidden();
     }
 
+    const sessionIp = await getSessionIp(request, payload.ip);
+
     const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
     const now = Math.floor(Date.now() / 1000);
 
@@ -153,8 +181,14 @@ export async function POST(request: Request) {
 
     const sessionId = id ? uuid(sourceId, id) : uuid(sourceId, ip, userAgent, sessionSalt);
 
-    // Create a session if not found
-    if (!clickhouse.enabled && !cache?.sessionId) {
+    // The cache token is a plain signed JWT, so it carries a hash rather than the address.
+    const ipHash = sessionIp ? hash(sessionIp) : undefined;
+
+    // Create a session if not found. Also re-run when the client IP no longer matches the
+    // one the cache token was issued for: the upsert refreshes session.ip, which otherwise
+    // never happens for distinctId-keyed sessions once a cache token is in play. The
+    // comparison is against the signed token, so no extra write happens in the common case.
+    if (!clickhouse.enabled && (!cache?.sessionId || cache.ipHash !== ipHash)) {
       await createSession({
         id: sessionId,
         websiteId: sourceId,
@@ -166,7 +200,7 @@ export async function POST(request: Request) {
         country,
         region,
         city,
-        ip: process.env.DISABLE_CLIENT_IP ? undefined : ip,
+        ip: sessionIp,
         distinctId: id,
         createdAt,
       });
@@ -317,7 +351,7 @@ export async function POST(request: Request) {
     }
 
     const token = createToken(
-      { websiteId, sessionId, visitId, iat, type: CACHE_TOKEN_TYPE },
+      { websiteId, sessionId, visitId, iat, ipHash, type: CACHE_TOKEN_TYPE },
       secret(),
     );
 
