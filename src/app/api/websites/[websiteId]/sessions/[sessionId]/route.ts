@@ -1,6 +1,7 @@
 import { getBlocklist } from '@/lib/blocklist';
 import { parseRequest } from '@/lib/request';
 import { json, unauthorized } from '@/lib/response';
+import { addIpReputation } from '@/lib/session-reputation';
 import { canViewWebsiteSection } from '@/permissions';
 import { getWebsiteSession } from '@/queries/sql';
 
@@ -17,12 +18,7 @@ export async function GET(
   const { websiteId, sessionId } = await params;
 
   if (
-    !(await canViewWebsiteSection(auth, websiteId, [
-      'sessions',
-      'events',
-      'realtime',
-      'revenue',
-    ]))
+    !(await canViewWebsiteSection(auth, websiteId, ['sessions', 'events', 'realtime', 'revenue']))
   ) {
     return unauthorized();
   }
@@ -35,5 +31,5 @@ export async function GET(
 
   const blocklist = await getBlocklist();
 
-  return json({ ...data, blocklist: blocklist.check(data.ip) });
+  return json(addIpReputation(data, blocklist));
 }

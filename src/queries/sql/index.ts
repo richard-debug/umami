@@ -29,6 +29,8 @@ export * from './getWeeklyTraffic';
 export * from './heatmap/extractHeatmapEvents';
 export * from './heatmap/getHeatmap';
 export * from './heatmap/saveHeatmapEvents';
+export * from './ip-reputation/getIpReputationReport';
+export * from './ip-reputation/saveIpReputationHits';
 export * from './pageviews/getPageviewExpandedMetrics';
 export * from './pageviews/getPageviewMetrics';
 export * from './pageviews/getPageviewStats';

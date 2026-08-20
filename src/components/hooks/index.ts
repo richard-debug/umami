@@ -20,6 +20,7 @@ export * from './queries/useDeleteQuery';
 export * from './queries/useEventDataPivotQuery';
 export * from './queries/useEventDataPropertiesQuery';
 export * from './queries/useEventDataQuery';
+export * from './queries/useIpReputationQuery';
 export * from './queries/useLinkQuery';
 export * from './queries/useLinkSharesQuery';
 export * from './queries/useLinksQuery';

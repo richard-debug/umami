@@ -1,19 +1,25 @@
 import ipaddr from 'ipaddr.js';
+import { getIpReputationConfidence } from './ip-reputation';
 
 const CACHE_KEY = 'ip-blocklist';
 /**
- * Three complementary feeds, so a flag can be corroborated rather than resting on one
- * source — the UI names whichever matched.
+ * Complementary feeds let a flag be corroborated rather than resting on one source — the
+ * UI names whichever matched.
  *
  *  - FireHOL level1: conservative aggregate (includes Spamhaus DROP), near-zero false
  *    positives, mostly ranges.
  *  - ipsum level 3: addresses appearing on at least three independent blocklists.
  *  - USTC: aggregates Spamhaus, Talos and Feodo Tracker.
+ *  - Spamhaus DROP: high-confidence malicious network ranges, provided as JSON lines.
+ *  - Feodo Tracker: active botnet command-and-control addresses.
  */
 const DEFAULT_URLS = [
   'firehol=https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset',
   'ipsum=https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt',
   'ustc=https://blackip.ustc.edu.cn/list.php?txt',
+  'spamhaus-drop-v4=https://www.spamhaus.org/drop/drop_v4.json',
+  'spamhaus-drop-v6=https://www.spamhaus.org/drop/drop_v6.json',
+  'feodo=https://feodotracker.abuse.ch/downloads/ipblocklist.txt',
 ].join(',');
 const REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
 const RETRY_INTERVAL = 5 * 60 * 1000;
@@ -25,13 +31,15 @@ interface Source {
   name: string;
   exact: Set<string>;
   ranges: { ipv4: Range[]; ipv6: Range[] };
+  /** False when this copy survived a failed refresh and is only stale evidence. */
+  fresh: boolean;
 }
 
 interface BlocklistCache {
   sources: Source[];
   /** Timestamp of the last completed attempt, successful or not. */
   checkedAt: number;
-  /** Whether that attempt produced usable data — a failure keeps the previous copy. */
+  /** Whether the last attempt refreshed every configured source successfully. */
   loaded: boolean;
   inflight?: Promise<Source[]>;
 }
@@ -39,11 +47,31 @@ interface BlocklistCache {
 export interface Blocklist {
   /** Names of the configured lists that contain this address. */
   check: (ip?: string | null) => string[];
+  /** User-facing state and export confidence for this address. */
+  evaluate: (ip?: string | null) => IpReputation;
   /** Configured list names, whether or not they matched. */
   sources: string[];
 }
 
-const EMPTY: Blocklist = { check: () => [], sources: [] };
+export interface IpReputation {
+  status: 'listed' | 'not-listed' | 'unavailable' | 'unknown';
+  confidence: 'high' | 'medium' | 'none';
+  sources: string[];
+  exportable: boolean;
+}
+
+const emptyReputation = (status: IpReputation['status']): IpReputation => ({
+  status,
+  confidence: 'none',
+  sources: [],
+  exportable: false,
+});
+
+const EMPTY: Blocklist = {
+  check: () => [],
+  evaluate: ip => emptyReputation(ip ? 'unavailable' : 'unknown'),
+  sources: [],
+};
 
 function getUrls() {
   if (process.env.DISABLE_IP_BLOCKLIST) {
@@ -82,24 +110,36 @@ function parseEntry(entry: string) {
 }
 
 /**
- * Feeds are plain text, one entry per line, mixing bare addresses with CIDR ranges and
- * IPv4 with IPv6. Bare addresses go into a set for O(1) hits; only ranges are scanned.
+ * Feeds are plain text or JSON lines, one entry per line, mixing bare addresses with CIDR
+ * ranges and IPv4 with IPv6. Bare addresses go into a set for O(1) hits; only ranges are
+ * scanned.
  */
 export function parseBlocklist(name: string, text: string): Source {
   const source: Source = {
     name,
     exact: new Set(),
     ranges: { ipv4: [], ipv6: [] },
+    fresh: true,
   };
 
   for (const line of text.split('\n')) {
-    const entry = line.trim();
+    let entry = line.trim();
 
     if (!entry || entry.startsWith('#') || entry.startsWith(';')) {
       continue;
     }
 
     try {
+      if (entry.startsWith('{')) {
+        const data = JSON.parse(entry);
+
+        if (typeof data?.cidr !== 'string') {
+          continue;
+        }
+
+        entry = data.cidr;
+      }
+
       if (entry.includes('/')) {
         const range = ipaddr.parseCIDR(entry);
 
@@ -126,7 +166,23 @@ async function fetchSource({ name, url }: { name: string; url: string }): Promis
       return null;
     }
 
-    return parseBlocklist(name, await response.text());
+    const text = await response.text();
+
+    if (/^\s*(?:<!doctype\s+html|<html)/i.test(text)) {
+      return null;
+    }
+
+    const source = parseBlocklist(name, text);
+    const entryCount = source.exact.size + source.ranges.ipv4.length + source.ranges.ipv6.length;
+
+    // Feodo documents that an empty feed can be legitimate. For the other defaults, a
+    // non-empty 200 response with no parseable entries is normally an upstream error page
+    // or format change, so retain the previous snapshot instead of replacing it with empty.
+    if (!entryCount && !name.startsWith('feodo')) {
+      return null;
+    }
+
+    return source;
   } catch {
     return null;
   }
@@ -142,32 +198,71 @@ function matches(source: Source, address: ipaddr.IPv4 | ipaddr.IPv6, normalized:
 }
 
 function build(sources: Source[]): Blocklist {
+  const findMatches = (ip?: string | null) => {
+    if (!ip || !sources.length) {
+      return [];
+    }
+
+    let address: ipaddr.IPv4 | ipaddr.IPv6;
+
+    try {
+      address = ipaddr.parse(ip);
+    } catch {
+      return [];
+    }
+
+    // Feeds built for firewall ingress filtering (FireHOL level1, for one) list bogons
+    // such as 10/8, 127/8 and 100.64/10 alongside genuinely hostile addresses. Blocking
+    // those at a firewall is correct; labelling a visitor with one as hostile is not, so
+    // anything that is not publicly routable is never flagged.
+    if (address.range() !== 'unicast') {
+      return [];
+    }
+
+    const normalized = address.toString();
+
+    return sources.filter(source => matches(source, address, normalized));
+  };
+  const check = (ip?: string | null) => findMatches(ip).map(source => source.name);
+
   return {
     sources: sources.map(s => s.name),
-    check: ip => {
-      if (!ip || !sources.length) {
-        return [];
+    check,
+    evaluate: ip => {
+      if (!ip) {
+        return emptyReputation('unknown');
       }
 
-      let address: ipaddr.IPv4 | ipaddr.IPv6;
-
-      try {
-        address = ipaddr.parse(ip);
-      } catch {
-        return [];
+      if (!sources.length) {
+        return emptyReputation('unavailable');
       }
 
-      // Feeds built for firewall ingress filtering (FireHOL level1, for one) list bogons
-      // such as 10/8, 127/8 and 100.64/10 alongside genuinely hostile addresses. Blocking
-      // those at a firewall is correct; labelling a visitor with one as hostile is not, so
-      // anything that is not publicly routable is never flagged.
-      if (address.range() !== 'unicast') {
-        return [];
+      const matched = findMatches(ip);
+      const matchedSources = matched.map(source => source.name);
+
+      if (!matchedSources.length) {
+        return emptyReputation(
+          sources.every(source => source.fresh) ? 'not-listed' : 'unavailable',
+        );
       }
 
-      const normalized = address.toString();
+      const currentSources = matched.filter(source => source.fresh).map(source => source.name);
 
-      return sources.filter(source => matches(source, address, normalized)).map(s => s.name);
+      if (!currentSources.length) {
+        return {
+          ...emptyReputation('unavailable'),
+          sources: matchedSources,
+        };
+      }
+
+      const { confidence, exportable } = getIpReputationConfidence(currentSources);
+
+      return {
+        status: 'listed',
+        confidence,
+        sources: currentSources,
+        exportable,
+      };
     },
   };
 }
@@ -200,13 +295,26 @@ export async function getBlocklist(): Promise<Blocklist> {
   }
 
   cache.inflight ??= (async () => {
-    const results = (await Promise.all(urls.map(fetchSource))).filter(Boolean) as Source[];
+    const previousSources = new Map(cache.sources.map(source => [source.name, source]));
+    const results = await Promise.all(urls.map(fetchSource));
+    const nextSources = urls
+      .map(({ name }, index) => {
+        const source = results[index];
+        const previous = previousSources.get(name);
+
+        return source ?? (previous ? { ...previous, fresh: false } : null);
+      })
+      .filter(Boolean) as Source[];
 
     cache.checkedAt = Date.now();
 
-    if (results.length) {
-      cache.sources = results;
-      cache.loaded = true;
+    if (nextSources.length) {
+      // Build the complete next snapshot first, then swap the reference once. Readers never
+      // observe a partially refreshed set, and a failed source retains its previous copy.
+      cache.sources = nextSources;
+      // A usable mixed snapshot can still be served, but an incomplete refresh retries on
+      // the shorter interval until every configured source has a current copy.
+      cache.loaded = results.every(Boolean);
     }
 
     cache.inflight = undefined;

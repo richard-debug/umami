@@ -4,6 +4,7 @@ import { DateDistance } from '@/components/common/DateDistance';
 import Link from '@/components/common/Link';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useMessages } from '@/components/hooks';
+import { IpReputationStatus } from './IpReputationStatus';
 
 function IpCell({ ip, blocklist }: { ip?: string; blocklist?: string[] }) {
   if (!ip) {
@@ -24,8 +25,13 @@ function IpCell({ ip, blocklist }: { ip?: string; blocklist?: string[] }) {
 export function SessionsTable({
   websiteId,
   getSessionHref,
+  showReputation,
   ...props
-}: DataTableProps & { websiteId: string; getSessionHref?: (row: any) => string }) {
+}: DataTableProps & {
+  websiteId: string;
+  getSessionHref?: (row: any) => string;
+  showReputation?: boolean;
+}) {
   const { t, labels } = useMessages();
   const { formatValue } = useFormat();
 
@@ -54,8 +60,15 @@ export function SessionsTable({
         )}
       </DataColumn>
       <DataColumn id="ip" label={t(labels.ipAddress)} width="180px">
-        {(row: any) => <IpCell ip={row.ip} blocklist={row.blocklist} />}
+        {(row: any) => (
+          <IpCell ip={row.ip} blocklist={showReputation ? undefined : row.blocklist} />
+        )}
       </DataColumn>
+      {showReputation && (
+        <DataColumn id="reputation" label={t(labels.ipReputation)} width="160px">
+          {(row: any) => <IpReputationStatus reputation={row.reputation} />}
+        </DataColumn>
+      )}
       <DataColumn id="browser" label={t(labels.browser)} width="140px">
         {(row: any) => (
           <TypeIcon type="browser" value={row.browser}>

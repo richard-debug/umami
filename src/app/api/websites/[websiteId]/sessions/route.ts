@@ -2,6 +2,7 @@ import { getBlocklist } from '@/lib/blocklist';
 import { getQueryFilters, parseRequest } from '@/lib/request';
 import { json, unauthorized } from '@/lib/response';
 import { filterParams, pagingParams, searchParams, withDateRange } from '@/lib/schema';
+import { addIpReputation } from '@/lib/session-reputation';
 import { canViewWebsiteSection } from '@/permissions';
 import { getWebsiteSessions } from '@/queries/sql';
 
@@ -35,6 +36,6 @@ export async function GET(
 
   return json({
     ...data,
-    data: data?.data?.map(row => ({ ...row, blocklist: blocklist.check(row.ip) })),
+    data: data?.data?.map(row => addIpReputation(row, blocklist)),
   });
 }
