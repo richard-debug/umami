@@ -1,21 +1,32 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { checkAuth } from '@/lib/auth';
+import { getBlocklist } from '@/lib/blocklist';
 import { CACHE_TOKEN_TYPE } from '@/lib/constants';
 import { hash, secret } from '@/lib/crypto';
 import { createToken } from '@/lib/jwt';
 import { parseRequest } from '@/lib/request';
-import { createSession } from '@/queries/sql';
+import { createSession, saveIpReputationHits } from '@/queries/sql';
 import { POST } from './route';
+
+const afterTasks = vi.hoisted(() => [] as Promise<unknown>[]);
+
+vi.mock('next/server', () => ({
+  after: vi.fn((callback: () => unknown) => {
+    afterTasks.push(Promise.resolve().then(callback));
+  }),
+}));
 
 vi.mock('@/lib/clickhouse', () => ({ default: { enabled: false } }));
 vi.mock('@/lib/load', () => ({
   fetchWebsite: vi.fn(async () => ({ id: '11111111-1111-1111-1111-111111111111' })),
 }));
 vi.mock('@/lib/auth', () => ({ checkAuth: vi.fn(async () => null) }));
+vi.mock('@/lib/blocklist', () => ({ getBlocklist: vi.fn() }));
 vi.mock('@/lib/request', () => ({ parseRequest: vi.fn() }));
 vi.mock('@/queries/sql', () => ({
   createSession: vi.fn(),
   saveEvent: vi.fn(),
+  saveIpReputationHits: vi.fn(),
   saveSessionData: vi.fn(),
 }));
 vi.mock('@/lib/detect', () => ({
@@ -41,6 +52,12 @@ const SPOOFED_IP = '198.51.100.7';
 const parseRequestMock = vi.mocked(parseRequest);
 const createSessionMock = vi.mocked(createSession);
 const checkAuthMock = vi.mocked(checkAuth);
+const getBlocklistMock = vi.mocked(getBlocklist);
+const saveIpReputationHitsMock = vi.mocked(saveIpReputationHits);
+
+async function flushAfterTasks() {
+  await Promise.all(afterTasks.splice(0));
+}
 
 function send({ payload = {}, headers = {} }: { payload?: any; headers?: Record<string, string> }) {
   const body = { type: 'event', payload: { website: WEBSITE_ID, url: '/', ...payload } };
@@ -81,8 +98,21 @@ beforeEach(() => {
   delete process.env.TRUSTED_PROXY_SECRET;
   parseRequestMock.mockReset();
   createSessionMock.mockReset();
+  saveIpReputationHitsMock.mockReset();
+  getBlocklistMock.mockReset();
+  getBlocklistMock.mockResolvedValue({
+    check: () => [],
+    evaluate: () => ({
+      status: 'not-listed',
+      confidence: 'none',
+      sources: [],
+      exportable: false,
+    }),
+    sources: ['test-source'],
+  });
   checkAuthMock.mockReset();
   checkAuthMock.mockResolvedValue(null);
+  afterTasks.splice(0);
 });
 
 describe('persisted session IP', () => {
@@ -239,5 +269,69 @@ describe('cached sessions', () => {
 
     expect(decoded.ipHash).toBe(hash(REAL_IP));
     expect(JSON.stringify(decoded)).not.toContain(REAL_IP);
+  });
+});
+
+describe('IP reputation history', () => {
+  test('records positive matches after the response path completes', async () => {
+    getBlocklistMock.mockResolvedValue({
+      check: () => ['spamhaus-drop-v4'],
+      evaluate: () => ({
+        status: 'listed',
+        confidence: 'high',
+        sources: ['spamhaus-drop-v4'],
+        exportable: true,
+      }),
+      sources: ['spamhaus-drop-v4'],
+    });
+
+    const response = await send({});
+
+    expect(response.status).toBe(200);
+    expect(saveIpReputationHitsMock).not.toHaveBeenCalled();
+
+    await flushAfterTasks();
+
+    expect(saveIpReputationHitsMock).toHaveBeenCalledWith({
+      websiteId: WEBSITE_ID,
+      ip: REAL_IP,
+      sources: ['spamhaus-drop-v4'],
+      observedAt: expect.any(Date),
+    });
+  });
+
+  test('does not persist clean addresses', async () => {
+    await send({});
+    await flushAfterTasks();
+
+    expect(saveIpReputationHitsMock).not.toHaveBeenCalled();
+  });
+
+  test('checks a cached visitor at most once per day when the IP is unchanged', async () => {
+    await send({
+      headers: {
+        'x-umami-cache': cacheToken({
+          ipHash: hash(REAL_IP),
+          reputationAt: Math.floor(Date.now() / 1000),
+        }),
+      },
+    });
+    await flushAfterTasks();
+
+    expect(getBlocklistMock).not.toHaveBeenCalled();
+  });
+
+  test('rechecks immediately when a cached visitor changes IP', async () => {
+    await send({
+      headers: {
+        'x-umami-cache': cacheToken({
+          ipHash: hash('192.0.2.99'),
+          reputationAt: Math.floor(Date.now() / 1000),
+        }),
+      },
+    });
+    await flushAfterTasks();
+
+    expect(getBlocklistMock).toHaveBeenCalledTimes(1);
   });
 });

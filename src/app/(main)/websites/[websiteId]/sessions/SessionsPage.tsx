@@ -3,8 +3,9 @@ import { Column, Tab, TabList, TabPanel, Tabs } from '@umami/react-zen';
 import { type Key, useState } from 'react';
 import { WebsiteControls } from '@/app/(main)/websites/[websiteId]/WebsiteControls';
 import { Panel } from '@/components/common/Panel';
-import { useMessages } from '@/components/hooks';
+import { useMessages, useShare } from '@/components/hooks';
 import { getItem, setItem } from '@/lib/storage';
+import { IpReputationPanel } from './IpReputationPanel';
 import { SessionModal } from './SessionModal';
 import { SessionProperties } from './SessionProperties';
 import { SessionsDataTable } from './SessionsDataTable';
@@ -14,6 +15,7 @@ const KEY_NAME = 'umami.sessions.tab';
 export function SessionsPage({ websiteId }) {
   const [tab, setTab] = useState(getItem(KEY_NAME) || 'activity');
   const { t, labels } = useMessages();
+  const share = useShare();
 
   const handleSelect = (value: Key) => {
     setItem(KEY_NAME, value);
@@ -33,6 +35,7 @@ export function SessionsPage({ websiteId }) {
           <TabList>
             <Tab id="activity">{t(labels.activity)}</Tab>
             <Tab id="properties">{t(labels.properties)}</Tab>
+            {!share && <Tab id="ip-reputation">{t(labels.ipReputation)}</Tab>}
           </TabList>
           <TabPanel id="activity" style={{ minWidth: 0, width: '100%' }}>
             <SessionsDataTable websiteId={websiteId} />
@@ -40,6 +43,11 @@ export function SessionsPage({ websiteId }) {
           <TabPanel id="properties" style={{ minWidth: 0, width: '100%', overflow: 'hidden' }}>
             <SessionProperties websiteId={websiteId} />
           </TabPanel>
+          {!share && (
+            <TabPanel id="ip-reputation" style={{ minWidth: 0, width: '100%', overflow: 'hidden' }}>
+              <IpReputationPanel websiteId={websiteId} />
+            </TabPanel>
+          )}
         </Tabs>
       </Panel>
     </Column>

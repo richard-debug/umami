@@ -1,8 +1,10 @@
 import { timingSafeEqual } from 'node:crypto';
 import { startOfHour } from 'date-fns';
 import { isbot } from 'isbot';
+import { after } from 'next/server';
 import { z } from 'zod';
 import { checkAuth } from '@/lib/auth';
+import { getBlocklist } from '@/lib/blocklist';
 import clickhouse from '@/lib/clickhouse';
 import { CACHE_TOKEN_TYPE, COLLECTION_TYPE, EVENT_TYPE } from '@/lib/constants';
 import { getSalt, hash, secret, uuid } from '@/lib/crypto';
@@ -14,7 +16,7 @@ import { parseRequest } from '@/lib/request';
 import { badRequest, forbidden, json, serverError } from '@/lib/response';
 import { anyObjectParam, urlOrPathParam } from '@/lib/schema';
 import { safeDecodeURI, safeDecodeURIComponent } from '@/lib/url';
-import { createSession, saveEvent, saveSessionData } from '@/queries/sql';
+import { createSession, saveEvent, saveIpReputationHits, saveSessionData } from '@/queries/sql';
 
 interface Cache {
   websiteId: string;
@@ -22,7 +24,10 @@ interface Cache {
   visitId: string;
   iat: number;
   ipHash?: string;
+  reputationAt?: number;
 }
+
+const REPUTATION_RECHECK_INTERVAL = 24 * 60 * 60;
 
 // Reject strings whose first character is a spreadsheet formula trigger to
 // prevent CSV formula injection in analytics exports (defense-in-depth).
@@ -416,10 +421,46 @@ export async function POST(request: Request) {
       });
     }
 
+    const shouldCheckReputation = Boolean(
+      websiteId &&
+        sessionIp &&
+        !clickhouse.enabled &&
+        !process.env.DISABLE_IP_BLOCKLIST &&
+        (!cache?.reputationAt ||
+          cache.ipHash !== ipHash ||
+          now - cache.reputationAt >= REPUTATION_RECHECK_INTERVAL),
+    );
+    const reputationAt = shouldCheckReputation ? now : cache?.reputationAt;
     const token = createToken(
-      { websiteId, sessionId, visitId, iat, ipHash, type: CACHE_TOKEN_TYPE },
+      { websiteId, sessionId, visitId, iat, ipHash, reputationAt, type: CACHE_TOKEN_TYPE },
       secret(),
     );
+
+    // Feed refreshes and history writes must never add latency to analytics ingestion.
+    // Capture server receipt time instead of the caller-controlled event timestamp so a
+    // forged payload cannot move observations into an arbitrary reporting period.
+    if (websiteId && sessionIp && shouldCheckReputation) {
+      const observedAt = new Date();
+
+      after(async () => {
+        try {
+          const reputation = (await getBlocklist()).evaluate(sessionIp);
+
+          if (reputation.status === 'listed') {
+            await saveIpReputationHits({
+              websiteId,
+              ip: sessionIp,
+              sources: reputation.sources,
+              observedAt,
+            });
+          }
+        } catch {
+          // Reputation history is enrichment. A feed or database failure must not turn a
+          // successful analytics request into an error, and logs must not reveal the IP.
+          console.error('[ip-reputation] Failed to record a reputation observation.');
+        }
+      });
+    }
 
     return json({ cache: token, sessionId, visitId });
   } catch (e) {

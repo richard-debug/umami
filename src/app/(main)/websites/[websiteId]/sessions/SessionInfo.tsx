@@ -1,9 +1,10 @@
-import { Column, Grid, Icon, Label, Row, StatusLight } from '@umami/react-zen';
+import { Column, Grid, Icon, Label, Row } from '@umami/react-zen';
 import type { ReactNode } from 'react';
 import { DateDistance } from '@/components/common/DateDistance';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useLocale, useMessages, useRegionNames } from '@/components/hooks';
 import { Calendar, KeyRound, Landmark, MapPin, Network } from '@/components/icons';
+import { IpReputationStatus } from './IpReputationStatus';
 
 export function SessionInfo({ data }) {
   const { locale } = useLocale();
@@ -14,9 +15,7 @@ export function SessionInfo({ data }) {
   return (
     <Grid columns="repeat(auto-fit, minmax(200px, 1fr)" gap>
       <Info label={t(labels.distinctId)} icon={<KeyRound />}>
-        <span style={{ overflowWrap: 'anywhere' }}>
-          {data?.distinctId}
-        </span>
+        <span style={{ overflowWrap: 'anywhere' }}>{data?.distinctId}</span>
       </Info>
 
       <Info label={t(labels.lastSeen)} icon={<Calendar />}>
@@ -43,11 +42,7 @@ export function SessionInfo({ data }) {
         {data?.ip && (
           <Column gap="1">
             <span style={{ overflowWrap: 'anywhere' }}>{data.ip}</span>
-            {data?.blocklist?.length > 0 && (
-              <StatusLight variant="error">
-                <span title={data.blocklist.join(', ')}>{t(labels.blocklisted)}</span>
-              </StatusLight>
-            )}
+            <IpReputationStatus reputation={data.reputation} />
           </Column>
         )}
       </Info>

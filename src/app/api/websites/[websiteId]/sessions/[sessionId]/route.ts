@@ -17,12 +17,7 @@ export async function GET(
   const { websiteId, sessionId } = await params;
 
   if (
-    !(await canViewWebsiteSection(auth, websiteId, [
-      'sessions',
-      'events',
-      'realtime',
-      'revenue',
-    ]))
+    !(await canViewWebsiteSection(auth, websiteId, ['sessions', 'events', 'realtime', 'revenue']))
   ) {
     return unauthorized();
   }
@@ -34,6 +29,7 @@ export async function GET(
   }
 
   const blocklist = await getBlocklist();
+  const reputation = blocklist.evaluate(data.ip);
 
-  return json({ ...data, blocklist: blocklist.check(data.ip) });
+  return json({ ...data, blocklist: reputation.sources, reputation });
 }

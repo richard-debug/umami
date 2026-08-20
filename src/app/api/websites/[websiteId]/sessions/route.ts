@@ -35,6 +35,10 @@ export async function GET(
 
   return json({
     ...data,
-    data: data?.data?.map(row => ({ ...row, blocklist: blocklist.check(row.ip) })),
+    data: data?.data?.map(row => {
+      const reputation = blocklist.evaluate(row.ip);
+
+      return { ...row, blocklist: reputation.sources, reputation };
+    }),
   });
 }
