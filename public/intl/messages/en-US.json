@@ -423,6 +423,7 @@
     "go-to-settings": "Go to settings",
     "incorrect-username-password": "Incorrect username and/or password.",
     "invalid-domain": "Invalid domain. Do not include http/https.",
+    "ip-reputation-description": "Addresses observed on this website that matched a threat feed during the selected period. Daily history is grouped in UTC. WAF exports re-check the current snapshot and include high-confidence matches only.",
     "min-password-length": "Minimum length of {n} characters",
     "new-version-available": "A new version of Umami {version} is available!",
     "no-data-available": "No data available.",

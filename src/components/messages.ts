@@ -411,6 +411,7 @@ export const labels: Record<string, string> = {
 
 export const messages: Record<string, string> = {
   error: 'message.error',
+  ipReputationDescription: 'message.ip-reputation-description',
   saved: 'message.saved',
   noUsers: 'message.no-users',
   userDeleted: 'message.user-deleted',

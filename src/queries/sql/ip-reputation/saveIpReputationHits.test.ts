@@ -19,7 +19,9 @@ test('upserts one deduplicated daily row per matching source', async () => {
   });
 
   expect(rawQuery).toHaveBeenCalledWith(
-    expect.stringMatching(/on conflict \(website_id, ip, source, observed_date\) do update/),
+    expect.stringMatching(
+      /\(\{\{observedAt\}\} at time zone 'UTC'\)::date[\s\S]*on conflict \(website_id, ip, source, observed_date\) do update/,
+    ),
     expect.objectContaining({
       ip: '203.0.113.4',
       sources: ['feodo', 'spamhaus-drop-v4'],

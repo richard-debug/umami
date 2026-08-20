@@ -424,7 +424,6 @@ export async function POST(request: Request) {
     const shouldCheckReputation = Boolean(
       websiteId &&
         sessionIp &&
-        !clickhouse.enabled &&
         !process.env.DISABLE_IP_BLOCKLIST &&
         (!cache?.reputationAt ||
           cache.ipHash !== ipHash ||

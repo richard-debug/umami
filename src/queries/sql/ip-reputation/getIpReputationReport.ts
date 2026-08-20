@@ -1,10 +1,20 @@
 import { DEFAULT_PAGE_SIZE } from '@/lib/constants';
+import {
+  CORROBORATION_EXCLUDED_SOURCE_PREFIXES,
+  HIGH_CONFIDENCE_SOURCE_PREFIXES,
+  MIN_CORROBORATING_SOURCES,
+} from '@/lib/ip-reputation';
 import type { IpReputationExportRow } from '@/lib/ip-reputation-export';
 import prisma from '@/lib/prisma';
 import type { QueryFilters } from '@/lib/types';
 
 const FUNCTION_NAME = 'getIpReputationReport';
-const EXPORT_LIMIT = 10000;
+const HIGH_CONFIDENCE_SOURCE_SQL = HIGH_CONFIDENCE_SOURCE_PREFIXES.map(
+  (_, index) => `source like {{highConfidenceSource${index}}}::text`,
+).join(' or ');
+const CORROBORATING_SOURCE_SQL = CORROBORATION_EXCLUDED_SOURCE_PREFIXES.map(
+  (_, index) => `source not like {{excludedSource${index}}}::text`,
+).join(' and ');
 
 export interface IpReputationFilters extends QueryFilters {
   source?: string;
@@ -28,12 +38,12 @@ const REPORT_CTE = `
       min(first_seen_at) as "firstSeenAt",
       max(last_seen_at) as "lastSeenAt",
       sum(hit_count) as "hitCount",
-      count(distinct source) >= 2
-        or bool_or(source like 'spamhaus-drop%' or source like 'feodo%') as exportable
+      count(distinct source) filter (where ${CORROBORATING_SOURCE_SQL}) >= ${MIN_CORROBORATING_SOURCES}
+        or bool_or(${HIGH_CONFIDENCE_SOURCE_SQL}) as exportable
     from ip_reputation_hit
     where website_id = {{websiteId::uuid}}
-      and observed_date >= ({{startDate}})::date
-      and observed_date <= ({{endDate}})::date
+      and observed_date >= ({{startDate}} at time zone 'UTC')::date
+      and observed_date <= ({{endDate}} at time zone 'UTC')::date
     group by ip
   ), filtered as (
     select *
@@ -59,6 +69,18 @@ function getParams(websiteId: string, filters: IpReputationFilters) {
     searchPattern: search ? `%${search}%` : null,
     source: source || null,
     confidence: confidence || null,
+    ...Object.fromEntries(
+      HIGH_CONFIDENCE_SOURCE_PREFIXES.map((sourceName, index) => [
+        `highConfidenceSource${index}`,
+        `${sourceName}%`,
+      ]),
+    ),
+    ...Object.fromEntries(
+      CORROBORATION_EXCLUDED_SOURCE_PREFIXES.map((sourceName, index) => [
+        `excludedSource${index}`,
+        `${sourceName}%`,
+      ]),
+    ),
   };
 }
 
@@ -139,7 +161,6 @@ export async function getIpReputationExportRows(websiteId: string, filters: IpRe
     select ip, sources, "firstSeenAt", "lastSeenAt", "hitCount", exportable
     from filtered
     order by "lastSeenAt" desc
-    limit ${EXPORT_LIMIT}
     `,
     getParams(websiteId, filters),
     'getIpReputationExportRows',

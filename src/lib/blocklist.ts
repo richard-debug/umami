@@ -1,9 +1,10 @@
 import ipaddr from 'ipaddr.js';
+import { getIpReputationConfidence } from './ip-reputation';
 
 const CACHE_KEY = 'ip-blocklist';
 /**
- * Three complementary feeds, so a flag can be corroborated rather than resting on one
- * source — the UI names whichever matched.
+ * Complementary feeds let a flag be corroborated rather than resting on one source — the
+ * UI names whichever matched.
  *
  *  - FireHOL level1: conservative aggregate (includes Spamhaus DROP), near-zero false
  *    positives, mostly ranges.
@@ -20,7 +21,6 @@ const DEFAULT_URLS = [
   'spamhaus-drop-v6=https://www.spamhaus.org/drop/drop_v6.json',
   'feodo=https://feodotracker.abuse.ch/downloads/ipblocklist.txt',
 ].join(',');
-const HIGH_CONFIDENCE_SOURCES = ['spamhaus-drop', 'feodo'];
 const REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
 const RETRY_INTERVAL = 5 * 60 * 1000;
 const FETCH_TIMEOUT = 20000;
@@ -31,13 +31,15 @@ interface Source {
   name: string;
   exact: Set<string>;
   ranges: { ipv4: Range[]; ipv6: Range[] };
+  /** False when this copy survived a failed refresh and is only stale evidence. */
+  fresh: boolean;
 }
 
 interface BlocklistCache {
   sources: Source[];
   /** Timestamp of the last completed attempt, successful or not. */
   checkedAt: number;
-  /** Whether that attempt produced usable data — a failure keeps the previous copy. */
+  /** Whether the last attempt refreshed every configured source successfully. */
   loaded: boolean;
   inflight?: Promise<Source[]>;
 }
@@ -64,17 +66,6 @@ const emptyReputation = (status: IpReputation['status']): IpReputation => ({
   sources: [],
   exportable: false,
 });
-
-export function getIpReputationConfidence(sources: string[]) {
-  const highConfidence =
-    sources.length >= 2 ||
-    sources.some(name => HIGH_CONFIDENCE_SOURCES.some(source => name.startsWith(source)));
-
-  return {
-    confidence: highConfidence ? ('high' as const) : ('medium' as const),
-    exportable: highConfidence,
-  };
-}
 
 const EMPTY: Blocklist = {
   check: () => [],
@@ -119,14 +110,16 @@ function parseEntry(entry: string) {
 }
 
 /**
- * Feeds are plain text, one entry per line, mixing bare addresses with CIDR ranges and
- * IPv4 with IPv6. Bare addresses go into a set for O(1) hits; only ranges are scanned.
+ * Feeds are plain text or JSON lines, one entry per line, mixing bare addresses with CIDR
+ * ranges and IPv4 with IPv6. Bare addresses go into a set for O(1) hits; only ranges are
+ * scanned.
  */
 export function parseBlocklist(name: string, text: string): Source {
   const source: Source = {
     name,
     exact: new Set(),
     ranges: { ipv4: [], ipv6: [] },
+    fresh: true,
   };
 
   for (const line of text.split('\n')) {
@@ -173,7 +166,23 @@ async function fetchSource({ name, url }: { name: string; url: string }): Promis
       return null;
     }
 
-    return parseBlocklist(name, await response.text());
+    const text = await response.text();
+
+    if (/^\s*(?:<!doctype\s+html|<html)/i.test(text)) {
+      return null;
+    }
+
+    const source = parseBlocklist(name, text);
+    const entryCount = source.exact.size + source.ranges.ipv4.length + source.ranges.ipv6.length;
+
+    // Feodo documents that an empty feed can be legitimate. For the other defaults, a
+    // non-empty 200 response with no parseable entries is normally an upstream error page
+    // or format change, so retain the previous snapshot instead of replacing it with empty.
+    if (!entryCount && !name.startsWith('feodo')) {
+      return null;
+    }
+
+    return source;
   } catch {
     return null;
   }
@@ -189,7 +198,7 @@ function matches(source: Source, address: ipaddr.IPv4 | ipaddr.IPv6, normalized:
 }
 
 function build(sources: Source[]): Blocklist {
-  const check = (ip?: string | null) => {
+  const findMatches = (ip?: string | null) => {
     if (!ip || !sources.length) {
       return [];
     }
@@ -212,8 +221,9 @@ function build(sources: Source[]): Blocklist {
 
     const normalized = address.toString();
 
-    return sources.filter(source => matches(source, address, normalized)).map(s => s.name);
+    return sources.filter(source => matches(source, address, normalized));
   };
+  const check = (ip?: string | null) => findMatches(ip).map(source => source.name);
 
   return {
     sources: sources.map(s => s.name),
@@ -227,18 +237,30 @@ function build(sources: Source[]): Blocklist {
         return emptyReputation('unavailable');
       }
 
-      const matchedSources = check(ip);
+      const matched = findMatches(ip);
+      const matchedSources = matched.map(source => source.name);
 
       if (!matchedSources.length) {
-        return emptyReputation('not-listed');
+        return emptyReputation(
+          sources.every(source => source.fresh) ? 'not-listed' : 'unavailable',
+        );
       }
 
-      const { confidence, exportable } = getIpReputationConfidence(matchedSources);
+      const currentSources = matched.filter(source => source.fresh).map(source => source.name);
+
+      if (!currentSources.length) {
+        return {
+          ...emptyReputation('unavailable'),
+          sources: matchedSources,
+        };
+      }
+
+      const { confidence, exportable } = getIpReputationConfidence(currentSources);
 
       return {
         status: 'listed',
         confidence,
-        sources: matchedSources,
+        sources: currentSources,
         exportable,
       };
     },
@@ -276,7 +298,12 @@ export async function getBlocklist(): Promise<Blocklist> {
     const previousSources = new Map(cache.sources.map(source => [source.name, source]));
     const results = await Promise.all(urls.map(fetchSource));
     const nextSources = urls
-      .map(({ name }, index) => results[index] ?? previousSources.get(name))
+      .map(({ name }, index) => {
+        const source = results[index];
+        const previous = previousSources.get(name);
+
+        return source ?? (previous ? { ...previous, fresh: false } : null);
+      })
       .filter(Boolean) as Source[];
 
     cache.checkedAt = Date.now();
@@ -285,7 +312,9 @@ export async function getBlocklist(): Promise<Blocklist> {
       // Build the complete next snapshot first, then swap the reference once. Readers never
       // observe a partially refreshed set, and a failed source retains its previous copy.
       cache.sources = nextSources;
-      cache.loaded = true;
+      // A usable mixed snapshot can still be served, but an incomplete refresh retries on
+      // the shorter interval until every configured source has a current copy.
+      cache.loaded = results.every(Boolean);
     }
 
     cache.inflight = undefined;

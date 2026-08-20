@@ -17,8 +17,8 @@ describe('formatIpReputationExport', () => {
   test('creates a reviewable audit CSV', () => {
     expect(formatIpReputationExport(rows, 'audit')).toBe(
       [
-        'ip,sources,first_seen,last_seen,hit_count,confidence',
-        '203.0.113.4,spamhaus-drop-v4|feodo,2026-08-01T01:02:03.000Z,2026-08-20T04:05:06.000Z,12,high',
+        'ip,sources,first_seen,last_seen,hit_count,confidence,review_after',
+        '203.0.113.4,spamhaus-drop-v4|feodo,2026-08-01T01:02:03.000Z,2026-08-20T04:05:06.000Z,12,high,2026-08-27',
       ].join('\r\n'),
     );
   });
@@ -29,7 +29,7 @@ describe('formatIpReputationExport', () => {
 
   test('creates Cloudflare item and description rows without a header', () => {
     expect(formatIpReputationExport(rows, 'cloudflare')).toBe(
-      '203.0.113.4,"Umami: spamhaus-drop-v4|feodo; hits=12; last=2026-08-20T04:05:06.000Z"\r\n',
+      '203.0.113.4,"Umami: spamhaus-drop-v4|feodo; hits=12; last=2026-08-20T04:05:06.000Z; review_after=2026-08-27"\r\n',
     );
   });
 

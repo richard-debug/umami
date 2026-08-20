@@ -22,6 +22,9 @@ also searchable.
 | `.../sessions/SessionInfo.tsx` | renders the IP field in the detail panel |
 | `.../sessions/SessionsTable.tsx` | IP column in the sessions list |
 | `src/app/api/send/route.test.ts` | covers the trust rules and the cached-session refresh |
+| `prisma/migrations/fork_add_ip_reputation_hits/migration.sql` | daily positive-match history for period reports |
+| `src/lib/blocklist.ts` | local multi-source IP reputation snapshots |
+| `.../sessions/IpReputationPanel.tsx` | authenticated history, filters, and WAF exports |
 
 `VARCHAR(45)` is the maximum length of an IPv4-mapped IPv6 literal, so every address
 form Umami can produce fits.
@@ -119,35 +122,56 @@ its payload is readable by anything that sees it.
 ## Blocklist status
 
 Sessions whose IP appears on a configured blocklist are flagged in both the detail panel
-and the sessions list. Hovering the flag names the lists that matched.
+and the sessions list. Hovering the flag names the lists that matched. For authenticated
+users, the Sessions page also has an **IP reputation** tab for daily history,
+source/confidence filters, and audit, generic WAF, or Cloudflare CSV downloads.
 
 `src/lib/blocklist.ts` downloads whole feeds and matches locally, rather than querying a
 reputation API per address. That means **no visitor IP is ever sent to a third party**, no
 API key is needed, and there is no per-visitor network call — which matters given the rest
 of this fork is about handling IPs carefully.
 
-Feeds are plain text, one entry per line, mixing bare addresses with CIDR ranges and IPv4
-with IPv6; comments and malformed lines are skipped. Nearly every public list uses this
-format. Three are configured by default, so a flag can be corroborated rather than resting
-on a single source — the UI names whichever matched:
+The parser accepts plain-text IP/CIDR lines and Spamhaus JSON lines, with IPv4 and IPv6.
+Comments and malformed lines are skipped. Six feeds are configured by default:
 
-| Feed | Entries | What it is |
+| Feed | Role | Confidence policy |
 | --- | --- | --- |
-| `firehol` | ~4,600 | Conservative aggregate incl. Spamhaus DROP. Near-zero false positives, mostly ranges. |
-| `ipsum` | ~16,100 | Addresses appearing on at least three independent blocklists. |
-| `ustc` | ~12,700 | Aggregates Spamhaus, Talos and Feodo Tracker. |
+| `firehol` | Conservative aggregate including Spamhaus DROP | Signal only; overlaps other defaults |
+| `ipsum` | IPs reported by at least three contributing lists | Signal only; overlaps other defaults |
+| `ustc` | Aggregate including Spamhaus, Talos, and Feodo | Signal only; overlaps other defaults |
+| `spamhaus-drop-v4` | Direct Spamhaus malicious IPv4 ranges | High confidence by itself |
+| `spamhaus-drop-v6` | Direct Spamhaus malicious IPv6 ranges | High confidence by itself |
+| `feodo` | Direct active botnet C2 addresses | High confidence by itself |
 
 Entries are `name=url` or a bare URL (the name then falls back to the hostname). The
 explicit form matters because feeds can share a host — FireHOL and ipsum are both on
-`raw.githubusercontent.com`. Other drop-in options: `blocklist.de/lists/all.txt`
-(~23,000, SSH/mail brute force), `cinsscore.com/list/ci-badguys.txt` (~15,000), and
-`rules.emergingthreats.net/blockrules/compromised-ips.txt` (~600, small and high
-confidence). Spamhaus DROP is *not* drop-in — it is JSON now, not line-oriented.
+`raw.githubusercontent.com`. A configured custom source is medium confidence by itself;
+two distinct non-aggregate custom sources are high confidence. FireHOL, ipsum, and USTC
+never corroborate one another because their upstream inputs overlap.
 
-Feeds are cached in module-global state for 6 hours. A failed refresh keeps serving the
-previous copy instead of silently reporting every address as clean, and retries after 5
-minutes rather than on every request. All three load in about 3 seconds; a lookup costs
-roughly 210µs, so a 50-row sessions page adds about 10ms.
+Refresh is lazy-periodic, not a cron job: each application process checks the cache when it
+uses it, and starts a refresh after six hours. Ingestion triggers it inside Next.js
+`after()`, so feed downloads and history writes happen after the analytics response. The
+first authenticated sessions read in a new process can wait for its initial snapshot.
+
+Publication is atomic within each process. All feeds are fetched in parallel and the next
+snapshot is built before one reference swap, so readers see either the prior snapshot or
+the complete next snapshot, never a partially mutated table. This is not a strict
+all-sources transaction: when one source fails, its previous copy is retained and marked
+stale while successful sources advance. Stale evidence can still explain a warning but
+cannot produce a high-confidence WAF export. Incomplete refreshes retry after five minutes;
+a fully fresh snapshot is used for six hours. HTML/error pages and unexpectedly empty feeds
+do not replace prior data. In a multi-instance deployment each process has its own snapshot
+and refresh timing.
+
+Positive matches are rolled up in Postgres by website, IP, source, and UTC day. A signed
+cache-token timestamp limits the normal check to once per visitor per 24 hours, with an
+immediate recheck if the IP changes. Audit exports preserve historical evidence. Firewall
+exports are stricter: they include only historical high-confidence IPs that are still
+high-confidence in the current fresh snapshot. Audit and Cloudflare CSV output includes a
+`review_after` date seven days after the last observation so entries are not silently
+treated as permanent. Direct Cloudflare API synchronization and credential storage remain
+out of scope; the generated file is for review and manual import.
 
 Addresses that are not publicly routable are never flagged, whatever the feeds say. Lists
 built for firewall ingress filtering — FireHOL level1 among them — deliberately include
@@ -167,7 +191,7 @@ look closer.
 | `TRUSTED_PROXY_SECRET` | `Header-Name: value` that your proxy injects. When set, header-derived IPs are stored only if it matches. |
 | `DISABLE_CLIENT_IP` | Set to `1` to stop persisting IPs. Everything else keeps working; the field renders as `—`. |
 | `IGNORE_IP` | Unchanged upstream behaviour — comma-separated IPs/CIDRs to drop entirely. |
-| `IP_BLOCKLIST_URLS` | Comma-separated `name=url` (or bare URL) feeds. Defaults to firehol + ipsum + ustc. |
+| `IP_BLOCKLIST_URLS` | Comma-separated `name=url` (or bare URL) feeds. Defaults to FireHOL, ipsum, USTC, Spamhaus DROP v4/v6, and Feodo. |
 | `DISABLE_IP_BLOCKLIST` | Set to `1` to skip blocklist loading entirely — no fetch, nothing flagged. |
 
 ## Behind Cloudflare
@@ -187,11 +211,11 @@ only when you trust every hop that can append to it.
 
 ## Scope / limitations
 
-- **Postgres only.** The ClickHouse path of `getWebsiteSession` is untouched, because
-  ClickHouse stores session attributes denormalised on `website_event`; adding `ip` there
-  means a column on the events table plus the `website_event_stats_hourly` materialised
-  view. With `CLICKHOUSE_URL` unset (the default, and what the Dokploy template deploys)
-  this code path never runs.
+- **The session IP column is Postgres only.** The ClickHouse path of `getWebsiteSession` is
+  untouched because it stores session attributes denormalised on `website_event`. IP
+  reputation history still works with ClickHouse analytics: positive matches are written
+  to Umami's Postgres metadata database, but ClickHouse session rows do not gain an IP
+  column from this fork.
 - **Existing sessions show `—`.** The column is backfilled with `NULL`; only sessions
   created after the migration have an IP.
 - **Search is a substring match** (`ilike '%…%'`), so `203.0.113` matches every session

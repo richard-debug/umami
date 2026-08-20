@@ -43,4 +43,5 @@ test('returns paged rows and JSON-safe summary numbers', async () => {
     },
   });
   expect(rawQuery.mock.calls[0][1]).toMatchObject({ confidence: 'high' });
+  expect(rawQuery.mock.calls[0][0]).toContain("at time zone 'UTC'");
 });

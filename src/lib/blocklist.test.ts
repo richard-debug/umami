@@ -121,7 +121,7 @@ describe('matching', () => {
     expect(blocklist.check('1.12.221.155')).toEqual(['lists.example.com', 'other.example.org']);
   });
 
-  test('evaluates a corroborated match as exportable high confidence', async () => {
+  test('does not treat overlapping default aggregates as independent corroboration', async () => {
     process.env.IP_BLOCKLIST_URLS =
       'ustc=https://lists.example.com/a.txt,ipsum=https://other.example.org/b.txt';
 
@@ -129,8 +129,22 @@ describe('matching', () => {
 
     expect(blocklist.evaluate('1.12.221.155')).toEqual({
       status: 'listed',
-      confidence: 'high',
+      confidence: 'medium',
       sources: ['ustc', 'ipsum'],
+      exportable: false,
+    });
+  });
+
+  test('evaluates two independent configured sources as exportable high confidence', async () => {
+    process.env.IP_BLOCKLIST_URLS =
+      'source-a=https://lists.example.com/a.txt,source-b=https://other.example.org/b.txt';
+
+    const blocklist = await getBlocklist();
+
+    expect(blocklist.evaluate('1.12.221.155')).toMatchObject({
+      status: 'listed',
+      confidence: 'high',
+      sources: ['source-a', 'source-b'],
       exportable: true,
     });
   });
@@ -251,6 +265,20 @@ describe('failure and opt-out', () => {
     const blocklist = await getBlocklist();
 
     expect(blocklist.check('1.12.221.155')).toEqual(['lists.example.com']);
+    expect(globalThis['ip-blocklist'].loaded).toBe(false);
+
+    // Incomplete attempts retry after the short interval even though the old data remains
+    // usable. Six minutes is longer than the five-minute retry window.
+    globalThis['ip-blocklist'].checkedAt -= 6 * 60 * 1000;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('8.8.8.8', { status: 200 })),
+    );
+
+    const refreshed = await getBlocklist();
+
+    expect(refreshed.check('8.8.8.8')).toEqual(['lists.example.com']);
+    expect(globalThis['ip-blocklist'].loaded).toBe(true);
   });
 
   test('atomically refreshes successful sources while retaining failed source snapshots', async () => {
@@ -280,6 +308,36 @@ describe('failure and opt-out', () => {
     expect(blocklist.sources).toEqual(['first', 'second']);
     expect(blocklist.check('1.12.221.155')).toEqual(['second']);
     expect(blocklist.check('8.8.8.8')).toEqual(['first']);
+    expect(blocklist.evaluate('1.12.221.155')).toMatchObject({
+      status: 'unavailable',
+      sources: ['second'],
+      exportable: false,
+    });
+    expect(blocklist.evaluate('9.9.9.9').status).toBe('unavailable');
+  });
+
+  test('retains the previous snapshot when a 200 response is not a feed', async () => {
+    process.env.IP_BLOCKLIST_URLS = 'first=https://lists.example.com/a.txt';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(FEED, { status: 200 })),
+    );
+
+    await getBlocklist();
+    globalThis['ip-blocklist'].checkedAt = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('<html>rate limited</html>', { status: 200 })),
+    );
+
+    const blocklist = await getBlocklist();
+
+    expect(blocklist.check('1.12.221.155')).toEqual(['first']);
+    expect(blocklist.evaluate('1.12.221.155')).toMatchObject({
+      status: 'unavailable',
+      sources: ['first'],
+      exportable: false,
+    });
   });
 
   test('does no network call at all when disabled', async () => {

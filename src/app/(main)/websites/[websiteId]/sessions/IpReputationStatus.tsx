@@ -10,7 +10,11 @@ export function IpReputationStatus({ reputation }: { reputation?: IpReputation }
   }
 
   if (reputation.status === 'unavailable') {
-    return <StatusLight variant="warning">{t(labels.unavailable)}</StatusLight>;
+    return (
+      <StatusLight variant="warning">
+        <span title={reputation.sources.join(', ') || undefined}>{t(labels.unavailable)}</span>
+      </StatusLight>
+    );
   }
 
   if (reputation.status === 'not-listed') {

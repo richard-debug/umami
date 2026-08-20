@@ -25,6 +25,14 @@ function toIso(value: Date | string) {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
+function getReviewDate(value: Date | string) {
+  const date = new Date(toIso(value));
+
+  date.setUTCDate(date.getUTCDate() + 7);
+
+  return date.toISOString().slice(0, 10);
+}
+
 export function formatIpReputationExport(
   rows: IpReputationExportRow[],
   format: IpReputationExportFormat,
@@ -38,7 +46,7 @@ export function formatIpReputationExport(
   if (format === 'cloudflare') {
     return uniqueRows
       .map(row => {
-        const description = `Umami: ${row.sources.join('|')}; hits=${row.hitCount}; last=${toIso(row.lastSeenAt)}`;
+        const description = `Umami: ${row.sources.join('|')}; hits=${row.hitCount}; last=${toIso(row.lastSeenAt)}; review_after=${getReviewDate(row.lastSeenAt)}`;
 
         return `${csvCell(row.ip)},${csvCell(description, true)}`;
       })
@@ -46,7 +54,7 @@ export function formatIpReputationExport(
       .concat(uniqueRows.length ? '\r\n' : '');
   }
 
-  const header = 'ip,sources,first_seen,last_seen,hit_count,confidence';
+  const header = 'ip,sources,first_seen,last_seen,hit_count,confidence,review_after';
   const body = uniqueRows.map(row =>
     [
       row.ip,
@@ -55,6 +63,7 @@ export function formatIpReputationExport(
       toIso(row.lastSeenAt),
       String(row.hitCount),
       row.confidence,
+      getReviewDate(row.lastSeenAt),
     ]
       .map(value => csvCell(value))
       .join(','),

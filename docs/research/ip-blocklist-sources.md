@@ -37,6 +37,10 @@ Do not export the union of all feeds. Export only IPs that:
    - a high-confidence source such as Spamhaus DROP or Feodo Tracker; or
    - at least two independent configured sources.
 
+The three default aggregate sources (FireHOL, ipsum, and USTC) have overlapping upstream
+inputs, so their co-occurrence is not treated as independent corroboration. Custom sources
+can satisfy the two-source rule; direct Spamhaus DROP and Feodo matches qualify alone.
+
 Keep the source names, first/last seen timestamps, and local hit count in the audit export.
 Dynamic residential, VPN, carrier-grade NAT, and cloud IPs can change owners, so generated
 WAF entries should have an expiry/review date rather than becoming permanent by default.
@@ -44,21 +48,23 @@ WAF entries should have an expiry/review date rather than becoming permanent by 
 ## Persistence needed for weekly, monthly, and yearly export
 
 The current application computes blocklist membership when a sessions API is read and does
-not persist a hit. Exact period reporting therefore needs a daily rollup keyed by:
+not persist a hit. Day-granular period reporting therefore needs a daily rollup keyed by:
 
 ```text
 website_id + ip + source + observed_date
 ```
 
-Each row should hold `first_seen_at`, `last_seen_at`, and `hit_count`. A daily bucket is
-small but preserves exact period boundaries. A single lifetime row with only first/last
-seen would incorrectly include quiet periods between two observations.
+Each row should hold `first_seen_at`, `last_seen_at`, and `hit_count`. The implemented
+bucket boundary is a UTC calendar day, so a selected period is evaluated at UTC-day
+granularity rather than pretending to preserve arbitrary local-time boundaries. A single
+lifetime row with only first/last seen would incorrectly include quiet periods between two
+observations.
 
 Recommended exports:
 
-- Audit CSV: `ip,sources,first_seen,last_seen,hit_count,confidence`.
+- Audit CSV: `ip,sources,first_seen,last_seen,hit_count,confidence,review_after`.
 - Generic WAF text: one unique IP or CIDR per line.
-- Cloudflare WAF CSV: one IP/CIDR per line with an optional description.
+- Cloudflare WAF CSV: one IP/CIDR per line with a description containing `review_after`.
 
 ## Cloudflare WAF constraints
 

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import { checkAuth } from '@/lib/auth';
 import { getBlocklist } from '@/lib/blocklist';
+import clickhouse from '@/lib/clickhouse';
 import { CACHE_TOKEN_TYPE } from '@/lib/constants';
 import { hash, secret } from '@/lib/crypto';
 import { createToken } from '@/lib/jwt';
@@ -90,6 +91,7 @@ function cacheToken(overrides: Record<string, any> = {}) {
 const storedIp = () => createSessionMock.mock.calls[0][0].ip;
 
 beforeEach(() => {
+  clickhouse.enabled = false;
   process.env.APP_SECRET = 'test-secret';
   // Named header = the operator has declared their proxy; see isProxiedRequest().
   process.env.CLIENT_IP_HEADER = 'cf-connecting-ip';
@@ -333,5 +335,26 @@ describe('IP reputation history', () => {
     await flushAfterTasks();
 
     expect(getBlocklistMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('records history when ClickHouse stores analytics events', async () => {
+    clickhouse.enabled = true;
+    getBlocklistMock.mockResolvedValue({
+      check: () => ['feodo'],
+      evaluate: () => ({
+        status: 'listed',
+        confidence: 'high',
+        sources: ['feodo'],
+        exportable: true,
+      }),
+      sources: ['feodo'],
+    });
+
+    await send({});
+    await flushAfterTasks();
+
+    expect(saveIpReputationHitsMock).toHaveBeenCalledWith(
+      expect.objectContaining({ websiteId: WEBSITE_ID, ip: REAL_IP, sources: ['feodo'] }),
+    );
   });
 });

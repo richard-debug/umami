@@ -40,7 +40,7 @@ export async function saveIpReputationHits({
       {{websiteId}},
       {{ip}},
       source,
-      ({{observedAt}})::date,
+      ({{observedAt}} at time zone 'UTC')::date,
       {{observedAt}},
       {{observedAt}},
       1

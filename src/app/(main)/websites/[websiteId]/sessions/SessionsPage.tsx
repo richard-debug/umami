@@ -16,6 +16,7 @@ export function SessionsPage({ websiteId }) {
   const [tab, setTab] = useState(getItem(KEY_NAME) || 'activity');
   const { t, labels } = useMessages();
   const share = useShare();
+  const selectedTab = share && tab === 'ip-reputation' ? 'activity' : tab;
 
   const handleSelect = (value: Key) => {
     setItem(KEY_NAME, value);
@@ -28,7 +29,7 @@ export function SessionsPage({ websiteId }) {
       <SessionModal websiteId={websiteId} />
       <Panel minWidth="0" width="100%" style={{ overflow: 'hidden' }}>
         <Tabs
-          selectedKey={tab}
+          selectedKey={selectedTab}
           onSelectionChange={handleSelect}
           style={{ minWidth: 0, width: '100%' }}
         >

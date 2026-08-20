@@ -115,7 +115,7 @@ function ExportMenu({
 }
 
 export function IpReputationPanel({ websiteId }: { websiteId: string }) {
-  const { t, labels } = useMessages();
+  const { t, labels, messages } = useMessages();
   const [source, setSource] = useState('all');
   const [confidence, setConfidence] = useState<ConfidenceFilter>('all');
   const sourceParam = source === 'all' ? undefined : source;
@@ -132,10 +132,7 @@ export function IpReputationPanel({ websiteId }: { websiteId: string }) {
 
   return (
     <Column gap="4">
-      <Text color="muted">
-        Addresses observed on this website that matched a threat feed during the selected period.
-        WAF exports re-check the current snapshot and include high-confidence matches only.
-      </Text>
+      <Text color="muted">{t(messages.ipReputationDescription)}</Text>
       <Row gap="6" wrap="wrap" paddingY="2">
         <SummaryItem label={t(labels.ipAddress)} value={formatNumber(summary?.uniqueIps ?? 0)} />
         <SummaryItem
