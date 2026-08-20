@@ -223,12 +223,38 @@ export async function POST(request: Request) {
 
     // The cache token is a plain signed JWT, so it carries a hash rather than the address.
     const ipHash = sessionIp ? hash(sessionIp) : undefined;
+    const willWriteSession = !clickhouse.enabled && (!cache?.sessionId || cache.ipHash !== ipHash);
+
+    if (process.env.DEBUG_SESSION_IP === '1') {
+      const configuredIpHeader = process.env.CLIENT_IP_HEADER;
+
+      // Do not log the address, hashes, or shared secret. This trace only records the
+      // decisions needed to diagnose why a session IP was not persisted.
+      console.info(
+        '[DEBUG-session-ip-a83f]',
+        JSON.stringify({
+          clientIpDisabled: Boolean(process.env.DISABLE_CLIENT_IP),
+          configuredIpHeader: configuredIpHeader || null,
+          configuredIpHeaderPresent: Boolean(
+            configuredIpHeader && request.headers.has(configuredIpHeader),
+          ),
+          trustedProxySecretConfigured: Boolean(process.env.TRUSTED_PROXY_SECRET),
+          proxyAccepted: payload.ip ? null : isProxiedRequest(request),
+          payloadIpPresent: Boolean(payload.ip),
+          sessionIpResolved: Boolean(sessionIp),
+          clickhouseEnabled: clickhouse.enabled,
+          cachedSessionPresent: Boolean(cache?.sessionId),
+          cachedIpHashPresent: Boolean(cache?.ipHash),
+          willWriteSession,
+        }),
+      );
+    }
 
     // Create a session if not found. Also re-run when the client IP no longer matches the
     // one the cache token was issued for: the upsert refreshes session.ip, which otherwise
     // never happens for distinctId-keyed sessions once a cache token is in play. The
     // comparison is against the signed token, so no extra write happens in the common case.
-    if (!clickhouse.enabled && (!cache?.sessionId || cache.ipHash !== ipHash)) {
+    if (willWriteSession) {
       await createSession({
         id: sessionId,
         websiteId: sourceId,
