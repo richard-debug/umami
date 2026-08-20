@@ -77,6 +77,7 @@ beforeEach(() => {
   // Named header = the operator has declared their proxy; see isProxiedRequest().
   process.env.CLIENT_IP_HEADER = 'cf-connecting-ip';
   delete process.env.DISABLE_CLIENT_IP;
+  delete process.env.DEBUG_SESSION_IP;
   delete process.env.TRUSTED_PROXY_SECRET;
   parseRequestMock.mockReset();
   createSessionMock.mockReset();
@@ -176,6 +177,32 @@ describe('proxy trust', () => {
     await send({});
 
     expect(storedIp()).toBeUndefined();
+  });
+});
+
+describe('session IP diagnostics', () => {
+  test('logs persistence decisions without logging the IP or proxy secret', async () => {
+    process.env.DEBUG_SESSION_IP = '1';
+    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+    const log = vi.spyOn(console, 'info').mockImplementation(() => undefined);
+
+    try {
+      await send({ headers: { 'x-origin-token': 's3cret' } });
+
+      expect(log).toHaveBeenCalledTimes(1);
+
+      const output = log.mock.calls[0].join(' ');
+
+      expect(output).toContain('[DEBUG-session-ip-a83f]');
+      expect(output).toContain('"configuredIpHeaderPresent":true');
+      expect(output).toContain('"proxyAccepted":true');
+      expect(output).toContain('"sessionIpResolved":true');
+      expect(output).toContain('"willWriteSession":true');
+      expect(output).not.toContain(REAL_IP);
+      expect(output).not.toContain('s3cret');
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 
