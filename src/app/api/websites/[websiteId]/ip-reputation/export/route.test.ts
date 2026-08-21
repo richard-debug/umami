@@ -97,6 +97,8 @@ describe('GET /api/websites/:websiteId/ip-reputation/export', () => {
         confidence: 'medium',
       }),
     );
-    await expect(response.text()).resolves.toContain('203.0.113.5,"Umami: ustc;');
+    await expect(response.text()).resolves.toBe(
+      '203.0.113.5,Umami sources=ustc hits=4 last=2026-08-20T00:00:00.000Z review_after=2026-08-27\r\n',
+    );
   });
 });

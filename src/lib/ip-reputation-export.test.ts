@@ -27,10 +27,20 @@ describe('formatIpReputationExport', () => {
     expect(formatIpReputationExport(rows, 'generic')).toBe('203.0.113.4\n');
   });
 
-  test('creates Cloudflare item and description rows without a header', () => {
+  test('creates Cloudflare WAF rows with one unquoted comma delimiter', () => {
     expect(formatIpReputationExport(rows, 'cloudflare')).toBe(
-      '203.0.113.4,"Umami: spamhaus-drop-v4|feodo; hits=12; last=2026-08-20T04:05:06.000Z; review_after=2026-08-27"\r\n',
+      '203.0.113.4,Umami sources=spamhaus-drop-v4+feodo hits=12 last=2026-08-20T04:05:06.000Z review_after=2026-08-27\r\n',
     );
+  });
+
+  test('keeps custom source names from introducing Cloudflare CSV delimiters', () => {
+    const unsafe = [{ ...rows[0], sources: ['bad,source', 'evil";\r\n\t|value'] }];
+    const output = formatIpReputationExport(unsafe, 'cloudflare');
+    const line = output.slice(0, -2);
+
+    expect(output.match(/\r\n/g)).toHaveLength(1);
+    expect(line.match(/,/g)).toHaveLength(1);
+    expect(line).not.toMatch(/[";\r\n\t|]/);
   });
 
   test('escapes formula-like feed labels in audit CSV output', () => {
