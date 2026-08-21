@@ -277,6 +277,7 @@ export const FIELD_LENGTH = {
   country: 2,
   region: 20,
   city: 50,
+  ip: 45,
   distinctId: 50,
   url: 500,
   pageTitle: 500,

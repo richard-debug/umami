@@ -30,7 +30,8 @@ async function relationalQuery(websiteId: string, filters: QueryFilters) {
            or city ilike {{search}}
            or browser ilike {{search}}
            or os ilike {{search}}
-           or device ilike {{search}})`
+           or device ilike {{search}}
+           or session.ip ilike {{search}})`
     : '';
 
   return pagedRawQuery(
@@ -47,6 +48,7 @@ async function relationalQuery(websiteId: string, filters: QueryFilters) {
       session.country,
       session.region,
       session.city,
+      session.ip,
       min(website_event.created_at) as "firstAt",
       max(website_event.created_at) as "lastAt",
       count(distinct website_event.visit_id) as "visits",
@@ -70,9 +72,10 @@ async function relationalQuery(websiteId: string, filters: QueryFilters) {
       session.device, 
       session.screen, 
       session.language, 
-      session.country, 
-      session.region, 
-      session.city
+      session.country,
+      session.region,
+      session.city,
+      session.ip
     order by max(website_event.created_at) desc
     `,
     queryParams,

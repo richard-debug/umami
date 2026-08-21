@@ -5,6 +5,7 @@ import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useLocale, useMessages, useRegionNames } from '@/components/hooks';
 import { Calendar, KeyRound, Landmark, MapPin } from '@/components/icons';
 import { Network } from '@/components/svg';
+import { IpReputationStatus } from './IpReputationStatus';
 
 export function SessionInfo({ data }) {
   const { locale } = useLocale();
@@ -38,6 +39,15 @@ export function SessionInfo({ data }) {
 
       <Info label={t(labels.city)} icon={<Landmark />}>
         {data?.city}
+      </Info>
+
+      <Info label={t(labels.ipAddress)} icon={<Network />}>
+        {data?.ip && (
+          <Column gap="1">
+            <span style={{ overflowWrap: 'anywhere' }}>{data.ip}</span>
+            <IpReputationStatus reputation={data.reputation} />
+          </Column>
+        )}
       </Info>
 
       <Info label={t(labels.browser)} icon={<TypeIcon type="browser" value={data?.browser} />}>

@@ -1,17 +1,29 @@
+import { timingSafeEqual } from 'node:crypto';
 import { startOfHour } from 'date-fns';
 import { isbot } from 'isbot';
+import { after } from 'next/server';
 import { z } from 'zod';
+import { checkAuth } from '@/lib/auth';
+import { getBlocklist } from '@/lib/blocklist';
 import clickhouse from '@/lib/clickhouse';
 import { CACHE_TOKEN_TYPE, COLLECTION_TYPE, EVENT_TYPE } from '@/lib/constants';
 import { getSalt, hash, secret, uuid } from '@/lib/crypto';
 import { getClientInfo, hasBlockedIp } from '@/lib/detect';
+import { getIpAddress } from '@/lib/ip';
 import { createToken, parseToken } from '@/lib/jwt';
 import { fetchWebsite } from '@/lib/load';
 import { parseRequest } from '@/lib/request';
 import { badRequest, forbidden, json, serverError } from '@/lib/response';
 import { anyObjectParam, urlOrPathParam } from '@/lib/schema';
 import { safeDecodeURI, safeDecodeURIComponent } from '@/lib/url';
-import { createSession, saveEvent, saveSessionData, saveSessionLink, updateSession } from '@/queries/sql';
+import {
+  createSession,
+  saveEvent,
+  saveIpReputationHits,
+  saveSessionData,
+  saveSessionLink,
+  updateSession,
+} from '@/queries/sql';
 
 interface Cache {
   websiteId: string;
@@ -19,7 +31,11 @@ interface Cache {
   visitId: string;
   iat: number;
   sessionLinkId?: string;
+  ipHash?: string;
+  reputationAt?: number;
 }
+
+const REPUTATION_RECHECK_INTERVAL = 24 * 60 * 60;
 
 // Reject strings whose first character is a spreadsheet formula trigger to
 // prevent CSV formula injection in analytics exports (defense-in-depth).
@@ -70,6 +86,68 @@ const schema = z.object({
       },
     ),
 });
+
+/**
+ * Whether this request demonstrably arrived through the deployment's own proxy.
+ *
+ * Forwarding headers are self-asserted. `cf-connecting-ip` is authoritative only on a
+ * request that actually transited Cloudflare — anyone who finds the origin address can
+ * connect to it directly and send whatever they like. Pinning `CLIENT_IP_HEADER` narrows
+ * which header is read; it does not establish that the proxy set it.
+ *
+ * `TRUSTED_PROXY_SECRET` closes that: `Header-Name: value`, where the proxy injects the
+ * header (a Cloudflare Transform Rule, for instance) and requests arriving without it are
+ * not believed. Without the secret the only remaining guarantee is network-level — the
+ * origin being unreachable except through the proxy — so we at least refuse to persist an
+ * address sourced from whichever of a dozen forgeable headers happened to be present.
+ */
+function isProxiedRequest(request: Request) {
+  const secret = process.env.TRUSTED_PROXY_SECRET;
+
+  if (!secret) {
+    // No proof available. Require the operator to have named their proxy's header rather
+    // than letting getIpAddress() walk the full candidate list for data we store.
+    return !!process.env.CLIENT_IP_HEADER;
+  }
+
+  const separator = secret.indexOf(':');
+
+  if (separator < 1) {
+    return false;
+  }
+
+  const expected = secret.slice(separator + 1).trim();
+  const actual = request.headers.get(secret.slice(0, separator).trim()) ?? '';
+
+  if (!expected || actual.length !== expected.length) {
+    return false;
+  }
+
+  return timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
+/**
+ * The IP to persist on the session row.
+ *
+ * /api/send is unauthenticated, so a payload-supplied `ip` is caller-controlled and must
+ * not be stored on the strength of the request alone — only an authenticated server-side
+ * caller may assert a client IP on someone else's behalf. A header-derived address is only
+ * stored when the request came through the proxy that is supposed to set it.
+ *
+ * This is deliberately narrower than the `ip` returned by getClientInfo(), which upstream
+ * also feeds into the session hash and the geolocation lookup.
+ */
+async function getSessionIp(request: Request, payloadIp?: string) {
+  if (process.env.DISABLE_CLIENT_IP) {
+    return undefined;
+  }
+
+  if (payloadIp) {
+    return (await checkAuth(request)) ? payloadIp : undefined;
+  }
+
+  return isProxiedRequest(request) ? getIpAddress(request.headers) : undefined;
+}
 
 export async function POST(request: Request) {
   try {
@@ -148,6 +226,8 @@ export async function POST(request: Request) {
       return forbidden();
     }
 
+    const sessionIp = await getSessionIp(request, payload.ip);
+
     const createdAt = timestamp ? new Date(timestamp * 1000) : new Date();
     const now = Math.floor(Date.now() / 1000);
 
@@ -159,8 +239,40 @@ export async function POST(request: Request) {
     const sessionDrift = !!websiteId && !!cache?.sessionId && cache.sessionId !== sessionId;
     const shouldEnsureSession = !clickhouse.enabled && sessionDrift;
 
-    // Create a session if not found
-    if ((!clickhouse.enabled && !cache?.sessionId) || shouldEnsureSession) {
+    // The cache token is a plain signed JWT, so it carries a hash rather than the address.
+    const ipHash = sessionIp ? hash(sessionIp) : undefined;
+    const willWriteSession =
+      !clickhouse.enabled && (!cache?.sessionId || shouldEnsureSession || cache.ipHash !== ipHash);
+
+    if (process.env.DEBUG_SESSION_IP === '1') {
+      const configuredIpHeader = process.env.CLIENT_IP_HEADER;
+
+      // Do not log the address, hashes, or shared secret. This trace only records the
+      // decisions needed to diagnose why a session IP was not persisted.
+      console.info(
+        '[DEBUG-session-ip-a83f]',
+        JSON.stringify({
+          clientIpDisabled: Boolean(process.env.DISABLE_CLIENT_IP),
+          configuredIpHeader: configuredIpHeader || null,
+          configuredIpHeaderPresent: Boolean(
+            configuredIpHeader && request.headers.has(configuredIpHeader),
+          ),
+          trustedProxySecretConfigured: Boolean(process.env.TRUSTED_PROXY_SECRET),
+          proxyAccepted: payload.ip ? null : isProxiedRequest(request),
+          payloadIpPresent: Boolean(payload.ip),
+          sessionIpResolved: Boolean(sessionIp),
+          clickhouseEnabled: clickhouse.enabled,
+          cachedSessionPresent: Boolean(cache?.sessionId),
+          cachedIpHashPresent: Boolean(cache?.ipHash),
+          willWriteSession,
+        }),
+      );
+    }
+
+    // Create a session if not found. Also re-run when upstream detects cache/session drift
+    // or the client IP no longer matches the signed token. This preserves upstream's fresh
+    // visit behavior while allowing the upsert to refresh session.ip.
+    if (willWriteSession) {
       await createSession({
         id: sessionId,
         websiteId: sourceId,
@@ -172,6 +284,7 @@ export async function POST(request: Request) {
         country,
         region,
         city,
+        ip: sessionIp,
         distinctId: id,
         createdAt,
       });
@@ -371,10 +484,54 @@ export async function POST(request: Request) {
       });
     }
 
+    const shouldCheckReputation = Boolean(
+      websiteId &&
+        sessionIp &&
+        !process.env.DISABLE_IP_BLOCKLIST &&
+        (!cache?.reputationAt ||
+          cache.ipHash !== ipHash ||
+          now - cache.reputationAt >= REPUTATION_RECHECK_INTERVAL),
+    );
+    const reputationAt = shouldCheckReputation ? now : cache?.reputationAt;
     const token = createToken(
-      { websiteId, sessionId, visitId, iat, sessionLinkId, type: CACHE_TOKEN_TYPE },
+      {
+        websiteId,
+        sessionId,
+        visitId,
+        iat,
+        sessionLinkId,
+        ipHash,
+        reputationAt,
+        type: CACHE_TOKEN_TYPE,
+      },
       secret(),
     );
+
+    // Feed refreshes and history writes must never add latency to analytics ingestion.
+    // Capture server receipt time instead of the caller-controlled event timestamp so a
+    // forged payload cannot move observations into an arbitrary reporting period.
+    if (websiteId && sessionIp && shouldCheckReputation) {
+      const observedAt = new Date();
+
+      after(async () => {
+        try {
+          const reputation = (await getBlocklist()).evaluate(sessionIp);
+
+          if (reputation.status === 'listed') {
+            await saveIpReputationHits({
+              websiteId,
+              ip: sessionIp,
+              sources: reputation.sources,
+              observedAt,
+            });
+          }
+        } catch {
+          // Reputation history is enrichment. A feed or database failure must not turn a
+          // successful analytics request into an error, and logs must not reveal the IP.
+          console.error('[ip-reputation] Failed to record a reputation observation.');
+        }
+      });
+    }
 
     return json({ cache: token, sessionId, visitId });
   } catch (e) {

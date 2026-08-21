@@ -12,6 +12,7 @@ export function SessionsDataTable({ websiteId }: { websiteId: string }) {
         <SessionsTable
           data={data}
           websiteId={websiteId}
+          showReputation
           getSessionHref={row => updateParams({ session: row.id })}
         />
       )}

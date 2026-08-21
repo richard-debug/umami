@@ -1,4 +1,5 @@
 import { beforeEach, expect, test, vi } from 'vitest';
+import { getBlocklist } from '@/lib/blocklist';
 import { isRelationalOnly } from '@/lib/db';
 import { parseRequest } from '@/lib/request';
 import { canDeleteWebsite, canViewWebsiteSection } from '@/permissions';
@@ -8,6 +9,10 @@ import { DELETE, GET } from './route';
 
 vi.mock('@/lib/db', () => ({
   isRelationalOnly: vi.fn(),
+}));
+
+vi.mock('@/lib/blocklist', () => ({
+  getBlocklist: vi.fn(),
 }));
 
 vi.mock('@/lib/request', () => ({
@@ -30,6 +35,7 @@ vi.mock('@/queries/sql', () => ({
 }));
 
 const isRelationalOnlyMock = vi.mocked(isRelationalOnly);
+const getBlocklistMock = vi.mocked(getBlocklist);
 const parseRequestMock = vi.mocked(parseRequest);
 const canDeleteWebsiteMock = vi.mocked(canDeleteWebsite);
 const canViewWebsiteSectionMock = vi.mocked(canViewWebsiteSection);
@@ -47,13 +53,24 @@ beforeEach(() => {
   getLinkedDistinctIdsMock.mockReset();
   getLinkedSessionIdsMock.mockReset();
   getWebsiteSessionMock.mockReset();
+  getBlocklistMock.mockReset();
+  getBlocklistMock.mockResolvedValue({
+    check: () => [],
+    evaluate: () => ({
+      status: 'not-listed',
+      confidence: 'none',
+      sources: [],
+      exportable: false,
+    }),
+    sources: ['test-source'],
+  });
 });
 
 test('GET returns not found when the session does not exist', async () => {
   parseRequestMock.mockResolvedValue({ auth: {}, error: undefined });
   canViewWebsiteSectionMock.mockResolvedValue(true);
-   isRelationalOnlyMock.mockReturnValue(true);
-   canDeleteWebsiteMock.mockResolvedValue(false);
+  isRelationalOnlyMock.mockReturnValue(true);
+  canDeleteWebsiteMock.mockResolvedValue(false);
   getWebsiteSessionMock.mockResolvedValue(undefined);
 
   const response = await GET(
@@ -96,6 +113,9 @@ test('GET includes canDelete when relational storage and delete permission are a
     id: 'session-1',
     canDelete: true,
     stitchedSessionCount: 2,
+    reputation: {
+      status: 'not-listed',
+    },
   });
 });
 

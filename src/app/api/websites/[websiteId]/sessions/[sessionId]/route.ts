@@ -1,6 +1,8 @@
+import { getBlocklist } from '@/lib/blocklist';
 import { isRelationalOnly } from '@/lib/db';
 import { parseRequest } from '@/lib/request';
 import { badRequest, json, notFound, ok, unauthorized } from '@/lib/response';
+import { addIpReputation } from '@/lib/session-reputation';
 import { canDeleteWebsite, canViewWebsiteSection } from '@/permissions';
 import { deleteSession } from '@/queries/prisma';
 import { getLinkedDistinctIds, getLinkedSessionIds, getWebsiteSession } from '@/queries/sql';
@@ -49,12 +51,18 @@ export async function GET(
   }
 
   const stitchedSessionCount = sessionIds.length;
+  const blocklist = await getBlocklist();
 
-  return json({
-    ...data,
-    canDelete,
-    stitchedSessionCount,
-  });
+  return json(
+    addIpReputation(
+      {
+        ...data,
+        canDelete,
+        stitchedSessionCount,
+      },
+      blocklist,
+    ),
+  );
 }
 
 export async function DELETE(

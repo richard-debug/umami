@@ -47,6 +47,7 @@ model Session {
   country    String?   @db.Char(2)
   region     String?   @db.VarChar(20)
   city       String?   @db.VarChar(50)
+  ip         String?   @db.VarChar(45)
   distinctId String?   @map("distinct_id") @db.VarChar(50)
   createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
 
@@ -105,12 +106,30 @@ model Website {
   sessionReplays      SessionReplay[]
   sessionReplaysSaved SessionReplaySaved[]
   heatmapEvents       HeatmapEvent[]
+  ipReputationHits    IpReputationHit[]
 
   @@index([userId])
   @@index([teamId])
   @@index([createdAt])
   @@index([createdBy])
   @@map("website")
+}
+
+model IpReputationHit {
+  websiteId    String   @map("website_id") @db.Uuid
+  ip           String   @db.VarChar(45)
+  source       String   @db.VarChar(64)
+  observedDate DateTime @map("observed_date") @db.Date
+  firstSeenAt  DateTime @map("first_seen_at") @db.Timestamptz(6)
+  lastSeenAt   DateTime @map("last_seen_at") @db.Timestamptz(6)
+  hitCount     Int      @default(1) @map("hit_count")
+
+  website Website @relation(fields: [websiteId], references: [id], onDelete: Cascade)
+
+  @@id([websiteId, ip, source, observedDate])
+  @@index([websiteId, observedDate])
+  @@index([websiteId, lastSeenAt])
+  @@map("ip_reputation_hit")
 }
 
 model WebsiteEvent {

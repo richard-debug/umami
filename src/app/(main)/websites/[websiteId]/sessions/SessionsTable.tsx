@@ -1,15 +1,37 @@
-import { DataColumn, DataTable, type DataTableProps } from '@umami/react-zen';
+import { DataColumn, DataTable, type DataTableProps, StatusLight } from '@umami/react-zen';
 import { Avatar } from '@/components/common/Avatar';
 import { DateDistance } from '@/components/common/DateDistance';
 import Link from '@/components/common/Link';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useMessages } from '@/components/hooks';
+import { IpReputationStatus } from './IpReputationStatus';
+
+function IpCell({ ip, blocklist }: { ip?: string; blocklist?: string[] }) {
+  if (!ip) {
+    return '—';
+  }
+
+  if (!blocklist?.length) {
+    return ip;
+  }
+
+  return (
+    <StatusLight variant="error">
+      <span title={blocklist.join(', ')}>{ip}</span>
+    </StatusLight>
+  );
+}
 
 export function SessionsTable({
   websiteId,
   getSessionHref,
+  showReputation,
   ...props
-}: DataTableProps & { websiteId: string; getSessionHref?: (row: any) => string }) {
+}: DataTableProps & {
+  websiteId: string;
+  getSessionHref?: (row: any) => string;
+  showReputation?: boolean;
+}) {
   const { t, labels } = useMessages();
   const { formatValue } = useFormat();
 
@@ -38,6 +60,16 @@ export function SessionsTable({
           </TypeIcon>
         )}
       </DataColumn>
+      <DataColumn id="ip" label={t(labels.ipAddress)} width="180px">
+        {(row: any) => (
+          <IpCell ip={row.ip} blocklist={showReputation ? undefined : row.blocklist} />
+        )}
+      </DataColumn>
+      {showReputation && (
+        <DataColumn id="reputation" label={t(labels.ipReputation)} width="160px">
+          {(row: any) => <IpReputationStatus reputation={row.reputation} />}
+        </DataColumn>
+      )}
       <DataColumn id="browser" label={t(labels.browser)} width="140px">
         {(row: any) => (
           <TypeIcon type="browser" value={row.browser}>
