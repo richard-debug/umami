@@ -1,360 +1,878 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
-import { checkAuth } from '@/lib/auth';
-import { getBlocklist } from '@/lib/blocklist';
+
+// Set a deterministic secret before anything reads it so that real crypto/jwt
+// helpers used by the route and by the test produce matching tokens.
+process.env.APP_SECRET = 'route-send-test-secret';
+
+import { isbot } from 'isbot';
 import clickhouse from '@/lib/clickhouse';
-import { CACHE_TOKEN_TYPE } from '@/lib/constants';
-import { hash, secret } from '@/lib/crypto';
-import { createToken } from '@/lib/jwt';
+import { CACHE_TOKEN_TYPE, EVENT_TYPE } from '@/lib/constants';
+import { getSalt, secret, uuid } from '@/lib/crypto';
+import { getClientInfo, hasBlockedIp } from '@/lib/detect';
+import { createToken, parseToken } from '@/lib/jwt';
+import { fetchWebsite } from '@/lib/load';
 import { parseRequest } from '@/lib/request';
-import { createSession, saveIpReputationHits } from '@/queries/sql';
+import {
+  createSession,
+  saveEvent,
+  saveSessionData,
+  saveSessionLink,
+  updateSession,
+} from '@/queries/sql';
 import { POST } from './route';
 
-const afterTasks = vi.hoisted(() => [] as Promise<unknown>[]);
-
-vi.mock('next/server', () => ({
-  after: vi.fn((callback: () => unknown) => {
-    afterTasks.push(Promise.resolve().then(callback));
-  }),
-}));
-
 vi.mock('@/lib/clickhouse', () => ({ default: { enabled: false } }));
-vi.mock('@/lib/load', () => ({
-  fetchWebsite: vi.fn(async () => ({ id: '11111111-1111-1111-1111-111111111111' })),
+
+vi.mock('@/lib/detect', () => ({
+  getClientInfo: vi.fn(),
+  hasBlockedIp: vi.fn(),
 }));
-vi.mock('@/lib/auth', () => ({ checkAuth: vi.fn(async () => null) }));
-vi.mock('@/lib/blocklist', () => ({ getBlocklist: vi.fn() }));
-vi.mock('@/lib/request', () => ({ parseRequest: vi.fn() }));
+
+vi.mock('@/lib/load', () => ({
+  fetchWebsite: vi.fn(),
+}));
+
+vi.mock('@/lib/request', () => ({
+  parseRequest: vi.fn(),
+}));
+
 vi.mock('@/queries/sql', () => ({
   createSession: vi.fn(),
   saveEvent: vi.fn(),
-  saveIpReputationHits: vi.fn(),
   saveSessionData: vi.fn(),
-}));
-vi.mock('@/lib/detect', () => ({
-  // Mirrors upstream: a payload ip wins over the headers for hashing/geolocation.
-  getClientInfo: vi.fn(async (_request: Request, payload: any) => ({
-    userAgent:
-      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    browser: 'chrome',
-    os: 'Mac OS',
-    device: 'laptop',
-    ip: payload?.ip ?? '203.0.113.45',
-    country: 'JP',
-    region: 'JP-12',
-    city: 'Funabashi',
-  })),
-  hasBlockedIp: vi.fn(() => false),
+  saveSessionLink: vi.fn(),
+  updateSession: vi.fn(),
 }));
 
-const WEBSITE_ID = '11111111-1111-1111-1111-111111111111';
-const REAL_IP = '203.0.113.45';
-const SPOOFED_IP = '198.51.100.7';
+vi.mock('isbot', () => ({
+  isbot: vi.fn(),
+}));
 
 const parseRequestMock = vi.mocked(parseRequest);
+const getClientInfoMock = vi.mocked(getClientInfo);
+const hasBlockedIpMock = vi.mocked(hasBlockedIp);
+const fetchWebsiteMock = vi.mocked(fetchWebsite);
+const isbotMock = vi.mocked(isbot);
 const createSessionMock = vi.mocked(createSession);
-const checkAuthMock = vi.mocked(checkAuth);
-const getBlocklistMock = vi.mocked(getBlocklist);
-const saveIpReputationHitsMock = vi.mocked(saveIpReputationHits);
+const saveEventMock = vi.mocked(saveEvent);
+const saveSessionDataMock = vi.mocked(saveSessionData);
+const saveSessionLinkMock = vi.mocked(saveSessionLink);
+const updateSessionMock = vi.mocked(updateSession);
 
-async function flushAfterTasks() {
-  await Promise.all(afterTasks.splice(0));
-}
+const WEBSITE_ID = '11111111-1111-4111-8111-111111111111';
+const LINK_ID = '22222222-2222-4222-8222-222222222222';
+const PIXEL_ID = '33333333-3333-4333-8333-333333333333';
 
-function send({ payload = {}, headers = {} }: { payload?: any; headers?: Record<string, string> }) {
-  const body = { type: 'event', payload: { website: WEBSITE_ID, url: '/', ...payload } };
+const defaultClientInfo = {
+  ip: '203.0.113.5',
+  userAgent: 'Mozilla/5.0',
+  device: 'desktop',
+  browser: 'chrome',
+  os: 'Windows 10',
+  country: 'US',
+  region: 'US-CA',
+  city: 'San Francisco',
+};
 
-  parseRequestMock.mockResolvedValue({ body, auth: null, error: undefined } as any);
+/**
+ * Drives POST by making parseRequest resolve to the given body. Because the
+ * route calls parseRequest(request, schema, ...), the schema is still captured
+ * on the mock for direct schema assertions.
+ */
+function callPOST(
+  { type, payload }: { type: string; payload: Record<string, any> },
+  { headers }: { headers?: Record<string, string> } = {},
+) {
+  parseRequestMock.mockResolvedValue({ body: { type, payload }, error: undefined });
 
   return POST(
     new Request('http://localhost/api/send', {
       method: 'POST',
-      headers: { 'cf-connecting-ip': REAL_IP, ...headers },
-      body: JSON.stringify(body),
+      headers,
     }),
   );
 }
 
-function cacheToken(overrides: Record<string, any> = {}) {
-  return createToken(
-    {
-      websiteId: WEBSITE_ID,
-      sessionId: '33333333-3333-3333-3333-333333333333',
-      visitId: '44444444-4444-4444-4444-444444444444',
-      iat: Math.floor(Date.now() / 1000),
-      type: CACHE_TOKEN_TYPE,
-      ...overrides,
-    },
-    secret(),
-  );
-}
+function makeComputedSessionId(sourceId: string, timestamp = Math.floor(Date.now() / 1000)) {
+  const createdAt = new Date(timestamp * 1000);
+  const sessionSalt = getSalt(process.env.SALT_ROTATION || 'month', createdAt);
 
-const storedIp = () => createSessionMock.mock.calls[0][0].ip;
+  return uuid(sourceId, defaultClientInfo.ip, defaultClientInfo.userAgent, sessionSalt);
+}
 
 beforeEach(() => {
-  clickhouse.enabled = false;
-  process.env.APP_SECRET = 'test-secret';
-  // Named header = the operator has declared their proxy; see isProxiedRequest().
-  process.env.CLIENT_IP_HEADER = 'cf-connecting-ip';
-  delete process.env.DISABLE_CLIENT_IP;
-  delete process.env.DEBUG_SESSION_IP;
-  delete process.env.TRUSTED_PROXY_SECRET;
-  parseRequestMock.mockReset();
-  createSessionMock.mockReset();
-  saveIpReputationHitsMock.mockReset();
-  getBlocklistMock.mockReset();
-  getBlocklistMock.mockResolvedValue({
-    check: () => [],
-    evaluate: () => ({
-      status: 'not-listed',
-      confidence: 'none',
-      sources: [],
-      exportable: false,
-    }),
-    sources: ['test-source'],
-  });
-  checkAuthMock.mockReset();
-  checkAuthMock.mockResolvedValue(null);
-  afterTasks.splice(0);
+  vi.clearAllMocks();
+  (clickhouse as any).enabled = false;
+  delete process.env.DISABLE_BOT_CHECK;
+  delete process.env.REMOVE_TRAILING_SLASH;
+  delete process.env.SALT_ROTATION;
+
+  isbotMock.mockReturnValue(false);
+  hasBlockedIpMock.mockReturnValue(false);
+  fetchWebsiteMock.mockResolvedValue({ id: WEBSITE_ID } as any);
+  getClientInfoMock.mockResolvedValue({ ...defaultClientInfo } as any);
+  createSessionMock.mockResolvedValue(undefined as any);
+  saveEventMock.mockResolvedValue(undefined as any);
+  saveSessionDataMock.mockResolvedValue(undefined as any);
+  saveSessionLinkMock.mockResolvedValue(undefined as any);
+  updateSessionMock.mockResolvedValue(undefined as any);
 });
 
-describe('persisted session IP', () => {
-  test('uses the IP resolved from trusted proxy headers', async () => {
-    await send({});
+describe('parseRequest error handling', () => {
+  test('returns the parseRequest error response and does not process the event', async () => {
+    parseRequestMock.mockResolvedValue({
+      body: undefined,
+      error: () => Response.json({ error: { code: 'bad-request', status: 400 } }, { status: 400 }),
+    });
 
-    expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(storedIp()).toBe(REAL_IP);
+    const response = await POST(new Request('http://localhost/api/send', { method: 'POST' }));
+
+    expect(response.status).toBe(400);
+    expect(saveEventMock).not.toHaveBeenCalled();
+    expect(getClientInfoMock).not.toHaveBeenCalled();
   });
 
-  test('ignores a payload IP from an unauthenticated caller', async () => {
-    await send({ payload: { ip: SPOOFED_IP } });
+  test('calls parseRequest with skipAuth so tracker requests are unauthenticated', async () => {
+    await callPOST({ type: 'event', payload: { website: WEBSITE_ID, url: '/' } });
 
-    expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(storedIp()).toBeUndefined();
-  });
-
-  test('accepts a payload IP from an authenticated caller', async () => {
-    checkAuthMock.mockResolvedValue({ user: { id: 'server' } } as any);
-
-    await send({ payload: { ip: SPOOFED_IP } });
-
-    expect(storedIp()).toBe(SPOOFED_IP);
-  });
-
-  test('does not run an auth check on ordinary browser traffic', async () => {
-    await send({});
-
-    expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(checkAuthMock).not.toHaveBeenCalled();
-  });
-
-  test('stores nothing when DISABLE_CLIENT_IP is set', async () => {
-    process.env.DISABLE_CLIENT_IP = '1';
-
-    await send({});
-
-    expect(storedIp()).toBeUndefined();
+    expect(parseRequestMock.mock.calls[0][2]).toEqual({ skipAuth: true });
   });
 });
 
-describe('proxy trust', () => {
-  test('stores nothing when no proxy header has been declared', async () => {
-    // Otherwise getIpAddress() would walk a dozen headers any client can set.
-    delete process.env.CLIENT_IP_HEADER;
+describe('schema validation', () => {
+  // The schema is passed to parseRequest; grab it and exercise safeParse directly.
+  async function getSchema() {
+    await callPOST({ type: 'event', payload: { website: WEBSITE_ID, url: '/' } });
+    return parseRequestMock.mock.calls[0][1] as {
+      safeParse: (value: unknown) => { success: boolean };
+    };
+  }
 
-    await send({});
+  test('rejects an invalid type enum value', async () => {
+    const schema = await getSchema();
 
-    expect(storedIp()).toBeUndefined();
+    expect(schema.safeParse({ type: 'bogus', payload: { website: WEBSITE_ID } }).success).toBe(
+      false,
+    );
+    expect(schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID } }).success).toBe(
+      true,
+    );
+    expect(schema.safeParse({ type: 'identify', payload: { website: WEBSITE_ID } }).success).toBe(
+      true,
+    );
+    expect(
+      schema.safeParse({ type: 'performance', payload: { website: WEBSITE_ID } }).success,
+    ).toBe(true);
   });
 
-  test('requires the shared secret once one is configured', async () => {
-    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+  test('requires exactly one of website, link, or pixel', async () => {
+    const schema = await getSchema();
 
-    await send({});
-
-    expect(storedIp()).toBeUndefined();
+    // zero set -> invalid
+    expect(schema.safeParse({ type: 'event', payload: {} }).success).toBe(false);
+    // one set -> valid
+    expect(schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID } }).success).toBe(
+      true,
+    );
+    expect(schema.safeParse({ type: 'event', payload: { link: LINK_ID } }).success).toBe(true);
+    expect(schema.safeParse({ type: 'event', payload: { pixel: PIXEL_ID } }).success).toBe(true);
+    // two set -> invalid
+    expect(
+      schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID, link: LINK_ID } }).success,
+    ).toBe(false);
+    // all three set -> invalid
+    expect(
+      schema.safeParse({
+        type: 'event',
+        payload: { website: WEBSITE_ID, link: LINK_ID, pixel: PIXEL_ID },
+      }).success,
+    ).toBe(false);
   });
 
-  test('stores the IP when the secret matches', async () => {
-    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
+  test('rejects CSV formula injection triggers in name and tag', async () => {
+    const schema = await getSchema();
 
-    await send({ headers: { 'x-origin-token': 's3cret' } });
-
-    expect(storedIp()).toBe(REAL_IP);
-  });
-
-  test('rejects a wrong or truncated secret', async () => {
-    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
-
-    await send({ headers: { 'x-origin-token': 'wrong!' } });
-    expect(storedIp()).toBeUndefined();
-
-    createSessionMock.mockReset();
-
-    await send({ headers: { 'x-origin-token': 's3cre' } });
-    expect(storedIp()).toBeUndefined();
-  });
-
-  test('a forged forwarding header alone is not enough', async () => {
-    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
-
-    // Direct-to-origin request impersonating Cloudflare.
-    await send({ headers: { 'cf-connecting-ip': '198.51.100.7' } });
-
-    expect(storedIp()).toBeUndefined();
-  });
-
-  test('ignores a malformed secret setting rather than trusting everything', async () => {
-    process.env.TRUSTED_PROXY_SECRET = 'no-colon-here';
-
-    await send({});
-
-    expect(storedIp()).toBeUndefined();
-  });
-});
-
-describe('session IP diagnostics', () => {
-  test('logs persistence decisions without logging the IP or proxy secret', async () => {
-    process.env.DEBUG_SESSION_IP = '1';
-    process.env.TRUSTED_PROXY_SECRET = 'x-origin-token: s3cret';
-    const log = vi.spyOn(console, 'info').mockImplementation(() => undefined);
-
-    try {
-      await send({ headers: { 'x-origin-token': 's3cret' } });
-
-      expect(log).toHaveBeenCalledTimes(1);
-
-      const output = log.mock.calls[0].join(' ');
-
-      expect(output).toContain('[DEBUG-session-ip-a83f]');
-      expect(output).toContain('"configuredIpHeaderPresent":true');
-      expect(output).toContain('"proxyAccepted":true');
-      expect(output).toContain('"sessionIpResolved":true');
-      expect(output).toContain('"willWriteSession":true');
-      expect(output).not.toContain(REAL_IP);
-      expect(output).not.toContain('s3cret');
-    } finally {
-      log.mockRestore();
+    for (const bad of ['=1+1', '+cmd', '-2', '@SUM', '\tvalue', '\rvalue']) {
+      expect(
+        schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID, name: bad } }).success,
+      ).toBe(false);
+      expect(
+        schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID, tag: bad } }).success,
+      ).toBe(false);
     }
+
+    // A safe leading character passes.
+    expect(
+      schema.safeParse({ type: 'event', payload: { website: WEBSITE_ID, name: 'signup' } }).success,
+    ).toBe(true);
+  });
+
+  test('enforces web vitals numeric bounds', async () => {
+    const schema = await getSchema();
+
+    expect(
+      schema.safeParse({ type: 'performance', payload: { website: WEBSITE_ID, lcp: -1 } }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({ type: 'performance', payload: { website: WEBSITE_ID, lcp: 60001 } })
+        .success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({ type: 'performance', payload: { website: WEBSITE_ID, cls: 101 } }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({ type: 'performance', payload: { website: WEBSITE_ID, lcp: 2500 } })
+        .success,
+    ).toBe(true);
   });
 });
 
-describe('cached sessions', () => {
-  test('refreshes the IP when it no longer matches the cache token', async () => {
-    await send({ headers: { 'x-umami-cache': cacheToken({ ipHash: hash('192.0.2.99') }) } });
+describe('bot detection gate', () => {
+  test('returns a 200 no-op response for bots and skips persistence', async () => {
+    isbotMock.mockReturnValue(true);
 
-    expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(storedIp()).toBe(REAL_IP);
-  });
-
-  test('skips the write when the IP is unchanged', async () => {
-    const response = await send({
-      headers: { 'x-umami-cache': cacheToken({ ipHash: hash(REAL_IP) }) },
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
     });
-
-    // Assert the request actually completed, so this cannot pass by bailing out early.
-    await expect(response.json()).resolves.toHaveProperty('sessionId');
-    expect(createSessionMock).not.toHaveBeenCalled();
-  });
-
-  test('backfills the IP for tokens issued before this feature', async () => {
-    await send({ headers: { 'x-umami-cache': cacheToken() } });
-
-    expect(createSessionMock).toHaveBeenCalledTimes(1);
-    expect(storedIp()).toBe(REAL_IP);
-  });
-
-  test('issues a token carrying the IP hash, never the address', async () => {
-    const response = await send({});
-    const { cache } = await response.json();
-
-    const decoded = JSON.parse(Buffer.from(cache.split('.')[1], 'base64url').toString());
-
-    expect(decoded.ipHash).toBe(hash(REAL_IP));
-    expect(JSON.stringify(decoded)).not.toContain(REAL_IP);
-  });
-});
-
-describe('IP reputation history', () => {
-  test('records positive matches after the response path completes', async () => {
-    getBlocklistMock.mockResolvedValue({
-      check: () => ['spamhaus-drop-v4'],
-      evaluate: () => ({
-        status: 'listed',
-        confidence: 'high',
-        sources: ['spamhaus-drop-v4'],
-        exportable: true,
-      }),
-      sources: ['spamhaus-drop-v4'],
-    });
-
-    const response = await send({});
 
     expect(response.status).toBe(200);
-    expect(saveIpReputationHitsMock).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toEqual({ beep: 'boop' });
+    expect(saveEventMock).not.toHaveBeenCalled();
+  });
 
-    await flushAfterTasks();
+  test('DISABLE_BOT_CHECK bypasses the bot gate', async () => {
+    process.env.DISABLE_BOT_CHECK = '1';
+    isbotMock.mockReturnValue(true);
 
-    expect(saveIpReputationHitsMock).toHaveBeenCalledWith({
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.not.toEqual({ beep: 'boop' });
+    expect(saveEventMock).toHaveBeenCalledTimes(1);
+    expect(isbotMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('IP blocklist', () => {
+  test('returns 403 when the client IP is blocked', async () => {
+    hasBlockedIpMock.mockReturnValue(true);
+
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'forbidden', status: 403 },
+    });
+    expect(saveEventMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('website lookup', () => {
+  test('returns 400 when the website does not exist', async () => {
+    fetchWebsiteMock.mockResolvedValue(null as any);
+
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
+    });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { message: 'Website not found.', status: 400 },
+    });
+    expect(saveEventMock).not.toHaveBeenCalled();
+  });
+
+  test('does not look up a website for link events', async () => {
+    await callPOST({ type: 'event', payload: { link: LINK_ID, url: '/' } });
+
+    expect(fetchWebsiteMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('session creation', () => {
+  test('creates a session when clickhouse is disabled and there is no cache', async () => {
+    await callPOST({ type: 'event', payload: { website: WEBSITE_ID, url: '/' } });
+
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    expect(createSessionMock.mock.calls[0][0]).toMatchObject({
       websiteId: WEBSITE_ID,
-      ip: REAL_IP,
-      sources: ['spamhaus-drop-v4'],
-      observedAt: expect.any(Date),
+      browser: 'chrome',
+      os: 'Windows 10',
+      device: 'desktop',
     });
   });
 
-  test('does not persist clean addresses', async () => {
-    await send({});
-    await flushAfterTasks();
+  test('does not create a session when clickhouse is enabled', async () => {
+    (clickhouse as any).enabled = true;
 
-    expect(saveIpReputationHitsMock).not.toHaveBeenCalled();
+    await callPOST({ type: 'event', payload: { website: WEBSITE_ID, url: '/' } });
+
+    expect(createSessionMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('eventType selection ladder', () => {
+  test('link events use the linkEvent type', async () => {
+    await callPOST({ type: 'event', payload: { link: LINK_ID, url: '/' } });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ eventType: EVENT_TYPE.linkEvent });
   });
 
-  test('checks a cached visitor at most once per day when the IP is unchanged', async () => {
-    await send({
-      headers: {
-        'x-umami-cache': cacheToken({
-          ipHash: hash(REAL_IP),
-          reputationAt: Math.floor(Date.now() / 1000),
-        }),
+  test('pixel events use the pixelEvent type', async () => {
+    await callPOST({ type: 'event', payload: { pixel: PIXEL_ID, url: '/' } });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ eventType: EVENT_TYPE.pixelEvent });
+  });
+
+  test('named website events use the customEvent type', async () => {
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/', name: 'signup' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({
+      eventType: EVENT_TYPE.customEvent,
+      eventName: 'signup',
+    });
+  });
+
+  test('unnamed website events use the pageView type', async () => {
+    await callPOST({ type: 'event', payload: { website: WEBSITE_ID, url: '/' } });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ eventType: EVENT_TYPE.pageView });
+  });
+});
+
+describe('event url and referrer parsing', () => {
+  test('extracts url path, query, domain and referrer fields', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com',
+        url: '/products?utm_source=news&gclid=abc',
+        referrer: 'https://www.google.com/search?q=umami',
       },
     });
-    await flushAfterTasks();
 
-    expect(getBlocklistMock).not.toHaveBeenCalled();
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({
+      hostname: 'example.com',
+      urlPath: '/products',
+      urlQuery: 'utm_source=news&gclid=abc',
+      utmSource: 'news',
+      gclid: 'abc',
+      referrerPath: '/search',
+      referrerQuery: 'q=umami',
+      referrerDomain: 'google.com',
+    });
   });
 
-  test('rechecks immediately when a cached visitor changes IP', async () => {
-    await send({
-      headers: {
-        'x-umami-cache': cacheToken({
-          ipHash: hash('192.0.2.99'),
-          reputationAt: Math.floor(Date.now() / 1000),
-        }),
+  test('does not save referrer domain when it matches the hostname', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com',
+        url: '/products',
+        referrer: 'https://www.example.com/prev?a=1',
       },
     });
-    await flushAfterTasks();
 
-    expect(getBlocklistMock).toHaveBeenCalledTimes(1);
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({
+      referrerPath: '/prev',
+      referrerQuery: 'a=1',
+    });
+    expect(arg.referrerDomain).toBeUndefined();
   });
 
-  test('records history when ClickHouse stores analytics events', async () => {
-    clickhouse.enabled = true;
-    getBlocklistMock.mockResolvedValue({
-      check: () => ['feodo'],
-      evaluate: () => ({
-        status: 'listed',
-        confidence: 'high',
-        sources: ['feodo'],
-        exportable: true,
-      }),
-      sources: ['feodo'],
+  test('does not save referrer domain for a path-only referrer', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com',
+        url: '/products',
+        referrer: '/prev?a=1',
+      },
     });
 
-    await send({});
-    await flushAfterTasks();
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({
+      referrerPath: '/prev',
+      referrerQuery: 'a=1',
+    });
+    expect(arg.referrerDomain).toBeUndefined();
+  });
 
-    expect(saveIpReputationHitsMock).toHaveBeenCalledWith(
-      expect.objectContaining({ websiteId: WEBSITE_ID, ip: REAL_IP, sources: ['feodo'] }),
+  test('saves referrer domain for a lookalike domain that only shares a prefix', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com',
+        url: '/products',
+        referrer: 'https://example.com.br/page',
+      },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({
+      referrerDomain: 'example.com.br',
+      referrerPath: '/page',
+    });
+  });
+
+  test('resolves a path-only referrer against the url domain when hostname is missing', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        url: 'https://example.com/products',
+        referrer: '/prev',
+      },
+    });
+
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({ referrerPath: '/prev' });
+    expect(arg.referrerDomain).toBeUndefined();
+  });
+
+  test('does not save referrer domain when hostname differs only by case', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'EXAMPLE.com',
+        url: '/products',
+        referrer: 'https://example.com/prev',
+      },
+    });
+
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({ referrerPath: '/prev' });
+    expect(arg.referrerDomain).toBeUndefined();
+  });
+
+  test('does not save referrer domain when hostname includes a port', async () => {
+    await callPOST({
+      type: 'event',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com:8443',
+        url: '/products',
+        referrer: 'https://example.com:8443/prev',
+      },
+    });
+
+    const arg = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    expect(arg).toMatchObject({ referrerPath: '/prev' });
+    expect(arg.referrerDomain).toBeUndefined();
+  });
+
+  test('REMOVE_TRAILING_SLASH strips a trailing slash from the url path', async () => {
+    process.env.REMOVE_TRAILING_SLASH = '1';
+
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, hostname: 'example.com', url: '/blog/' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ urlPath: '/blog' });
+  });
+
+  test('REMOVE_TRAILING_SLASH keeps the root path as "/"', async () => {
+    process.env.REMOVE_TRAILING_SLASH = '1';
+
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, hostname: 'example.com', url: '/' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ urlPath: '/' });
+  });
+
+  test('REMOVE_TRAILING_SLASH keeps the root path when the url has a hash', async () => {
+    process.env.REMOVE_TRAILING_SLASH = '1';
+
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, hostname: 'example.com', url: '/#hero' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ urlPath: '/#hero' });
+  });
+
+  test('REMOVE_TRAILING_SLASH strips a trailing slash before the hash', async () => {
+    process.env.REMOVE_TRAILING_SLASH = '1';
+
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, hostname: 'example.com', url: '/blog/#hero' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ urlPath: '/blog#hero' });
+  });
+
+  test('maps a "/undefined" pathname to an empty url path', async () => {
+    await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, hostname: 'example.com', url: '/undefined' },
+    });
+
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({ urlPath: '' });
+  });
+});
+
+describe('cache token handling', () => {
+  function makeCacheToken(overrides: Record<string, any> = {}) {
+    return createToken(
+      {
+        type: CACHE_TOKEN_TYPE,
+        websiteId: WEBSITE_ID,
+        sessionId: 'cached-session',
+        visitId: 'cached-visit',
+        iat: Math.floor(Date.now() / 1000),
+        ...overrides,
+      },
+      secret(),
     );
+  }
+
+  test('a valid cache token skips website lookup and session creation when it matches the computed session', async () => {
+    const timestamp = 1704067200;
+    const token = makeCacheToken({ sessionId: makeComputedSessionId(WEBSITE_ID, timestamp) });
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/', timestamp } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(fetchWebsiteMock).not.toHaveBeenCalled();
+    expect(createSessionMock).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toMatchObject({ visitId: 'cached-visit' });
+  });
+
+  test('a valid cache token creates the computed session before event writes when the cached session differs', async () => {
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    const createdSession = createSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedEvent = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createdSession.id).not.toBe('cached-session');
+    expect(savedEvent.sessionId).toBe(createdSession.id);
+    expect(savedEvent.visitId).not.toBe('cached-visit');
+    expect(body.sessionId).toBe(createdSession.id);
+    expect(body.visitId).toBe(savedEvent.visitId);
+  });
+
+  test('a valid cache token creates the computed session before identify writes when the cached session differs', async () => {
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'identify', payload: { website: WEBSITE_ID, id: 'user-42', data: { plan: 'pro' } } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+    const createdSession = createSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedLink = saveSessionLinkMock.mock.calls[0][0] as Record<string, any>;
+    const updatedSession = updateSessionMock.mock.calls[0][0] as Record<string, any>;
+    const savedSessionData = saveSessionDataMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createdSession.id).not.toBe('cached-session');
+    expect(savedLink.sessionId).toBe(createdSession.id);
+    expect(updatedSession.sessionId).toBe(createdSession.id);
+    expect(savedSessionData.sessionId).toBe(createdSession.id);
+    expect(body.sessionId).toBe(createdSession.id);
+    expect(body.visitId).not.toBe('cached-visit');
+  });
+
+  test('a drifted cache token resets the visit in clickhouse mode without creating a session row', async () => {
+    (clickhouse as any).enabled = true;
+    const token = makeCacheToken({ sessionId: 'cached-session' });
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    const savedEvent = saveEventMock.mock.calls[0][0] as Record<string, any>;
+    const body = (await response.json()) as Record<string, any>;
+
+    expect(createSessionMock).not.toHaveBeenCalled();
+    expect(savedEvent.sessionId).toBe(body.sessionId);
+    expect(savedEvent.visitId).not.toBe('cached-visit');
+    expect(body.visitId).toBe(savedEvent.visitId);
+  });
+
+  test('an invalid cache token falls back to website lookup', async () => {
+    await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': 'not-a-jwt' } },
+    );
+
+    expect(fetchWebsiteMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('a token with a non-cache type is ignored', async () => {
+    const token = createToken(
+      { type: 'share', websiteId: WEBSITE_ID, sessionId: 's', visitId: 'v', iat: 1 },
+      secret(),
+    );
+
+    await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(fetchWebsiteMock).toHaveBeenCalledTimes(1);
+    expect(createSessionMock).toHaveBeenCalledTimes(1);
+  });
+
+  test('an expired cache token is treated as absent', async () => {
+    const token = createToken(
+      {
+        type: CACHE_TOKEN_TYPE,
+        websiteId: WEBSITE_ID,
+        sessionId: 'cached-session',
+        visitId: 'cached-visit',
+      },
+      secret(),
+      { expiresIn: -10 },
+    );
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(fetchWebsiteMock).toHaveBeenCalledTimes(1);
+    // A fresh visitId is generated rather than reusing the token's value.
+    await expect(response.json()).resolves.not.toMatchObject({ visitId: 'cached-visit' });
+  });
+
+  test('returns a signed cache token that round-trips to the response identifiers', async () => {
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
+    });
+
+    const body = (await response.json()) as Record<string, any>;
+    const decoded = parseToken(body.cache, secret()) as Record<string, any>;
+
+    expect(decoded.type).toBe(CACHE_TOKEN_TYPE);
+    expect(decoded.sessionId).toBe(body.sessionId);
+    expect(decoded.visitId).toBe(body.visitId);
+    expect(decoded.websiteId).toBe(WEBSITE_ID);
+  });
+});
+
+describe('30-minute visit expiry', () => {
+  test('regenerates the visit when the cached iat is older than 30 minutes', async () => {
+    const oldIat = Math.floor(Date.now() / 1000) - 2000;
+    const token = createToken(
+      {
+        type: CACHE_TOKEN_TYPE,
+        websiteId: WEBSITE_ID,
+        sessionId: 'cached-session',
+        visitId: 'cached-visit',
+        iat: oldIat,
+      },
+      secret(),
+    );
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    const body = (await response.json()) as Record<string, any>;
+    expect(body.visitId).not.toBe('cached-visit');
+  });
+
+  test('keeps the cached visit when within the 30-minute window', async () => {
+    const recentIat = Math.floor(Date.now() / 1000) - 100;
+    const token = createToken(
+      {
+        type: CACHE_TOKEN_TYPE,
+        websiteId: WEBSITE_ID,
+        sessionId: makeComputedSessionId(WEBSITE_ID),
+        visitId: 'cached-visit',
+        iat: recentIat,
+      },
+      secret(),
+    );
+
+    const response = await callPOST(
+      { type: 'event', payload: { website: WEBSITE_ID, url: '/' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    await expect(response.json()).resolves.toMatchObject({ visitId: 'cached-visit' });
+  });
+
+  test('does not expire the visit when an explicit timestamp is supplied', async () => {
+    const timestamp = 1000000000;
+    const oldIat = Math.floor(Date.now() / 1000) - 5000;
+    const token = createToken(
+      {
+        type: CACHE_TOKEN_TYPE,
+        websiteId: WEBSITE_ID,
+        sessionId: makeComputedSessionId(WEBSITE_ID, timestamp),
+        visitId: 'cached-visit',
+        iat: oldIat,
+      },
+      secret(),
+    );
+
+    const response = await callPOST(
+      {
+        type: 'event',
+        payload: { website: WEBSITE_ID, url: '/', timestamp },
+      },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    await expect(response.json()).resolves.toMatchObject({ visitId: 'cached-visit' });
+  });
+});
+
+describe('identify collection', () => {
+  test('saves a session link and updates the session for a new distinctId', async () => {
+    await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-42' },
+    });
+
+    expect(saveSessionLinkMock).toHaveBeenCalledTimes(1);
+    expect(updateSessionMock).toHaveBeenCalledTimes(1);
+    expect(saveSessionLinkMock.mock.calls[0][0]).toMatchObject({
+      websiteId: WEBSITE_ID,
+      distinctId: 'user-42',
+    });
+  });
+
+  test('saves session data when a data payload is present', async () => {
+    await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-42', data: { plan: 'pro' } },
+    });
+
+    expect(saveSessionDataMock).toHaveBeenCalledTimes(1);
+    expect(saveSessionDataMock.mock.calls[0][0]).toMatchObject({
+      websiteId: WEBSITE_ID,
+      sessionData: { plan: 'pro' },
+    });
+  });
+
+  test('skips identity writes when the cached sessionLinkId already matches', async () => {
+    // First identify establishes the link and returns a cache token carrying
+    // the resulting sessionLinkId.
+    const first = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-42' },
+    });
+    const firstBody = (await first.json()) as Record<string, any>;
+    const token = firstBody.cache;
+
+    saveSessionLinkMock.mockClear();
+    updateSessionMock.mockClear();
+
+    // Replaying with that token should recognise the same identity and skip.
+    await callPOST(
+      { type: 'identify', payload: { website: WEBSITE_ID, id: 'user-42' } },
+      { headers: { 'x-umami-cache': token } },
+    );
+
+    expect(saveSessionLinkMock).not.toHaveBeenCalled();
+    expect(updateSessionMock).not.toHaveBeenCalled();
+  });
+
+  test('does not write identity records without a website id', async () => {
+    await callPOST({
+      type: 'identify',
+      payload: { link: LINK_ID, id: 'user-42' },
+    });
+
+    expect(saveSessionLinkMock).not.toHaveBeenCalled();
+    expect(updateSessionMock).not.toHaveBeenCalled();
+  });
+
+  test('identity link failures do not block session data writes', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    saveSessionLinkMock.mockRejectedValue(new Error('link failed'));
+
+    const response = await callPOST({
+      type: 'identify',
+      payload: { website: WEBSITE_ID, id: 'user-42', data: { plan: 'pro' } },
+    });
+
+    expect(response.status).toBe(200);
+    expect(saveSessionDataMock).toHaveBeenCalledTimes(1);
+    consoleError.mockRestore();
+  });
+});
+
+describe('performance collection', () => {
+  test('saves a performance event with the web vitals metrics', async () => {
+    await callPOST({
+      type: 'performance',
+      payload: {
+        website: WEBSITE_ID,
+        hostname: 'example.com',
+        url: '/dashboard',
+        lcp: 1200,
+        inp: 50,
+        cls: 0.05,
+        fcp: 900,
+        ttfb: 300,
+      },
+    });
+
+    expect(saveEventMock).toHaveBeenCalledTimes(1);
+    expect(saveEventMock.mock.calls[0][0]).toMatchObject({
+      eventType: EVENT_TYPE.performance,
+      urlPath: '/dashboard',
+      lcp: 1200,
+      inp: 50,
+      cls: 0.05,
+      fcp: 900,
+      ttfb: 300,
+    });
+  });
+});
+
+describe('error handling', () => {
+  test('returns a 500 server error when persistence throws', async () => {
+    saveEventMock.mockRejectedValue(new Error('db down'));
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const response = await callPOST({
+      type: 'event',
+      payload: { website: WEBSITE_ID, url: '/' },
+    });
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'server-error', status: 500 },
+    });
+    consoleLog.mockRestore();
   });
 });

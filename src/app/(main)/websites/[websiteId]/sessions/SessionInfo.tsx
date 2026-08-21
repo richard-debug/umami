@@ -3,7 +3,8 @@ import type { ReactNode } from 'react';
 import { DateDistance } from '@/components/common/DateDistance';
 import { TypeIcon } from '@/components/common/TypeIcon';
 import { useFormat, useLocale, useMessages, useRegionNames } from '@/components/hooks';
-import { Calendar, KeyRound, Landmark, MapPin, Network } from '@/components/icons';
+import { Calendar, KeyRound, Landmark, MapPin } from '@/components/icons';
+import { Network } from '@/components/svg';
 import { IpReputationStatus } from './IpReputationStatus';
 
 export function SessionInfo({ data }) {
@@ -11,11 +12,13 @@ export function SessionInfo({ data }) {
   const { t, labels } = useMessages();
   const { formatValue } = useFormat();
   const { getRegionName } = useRegionNames(locale);
+  const distinctId = data?.distinctId?.trim();
+  const stitchedSessionCount = data?.stitchedSessionCount;
 
   return (
     <Grid columns="repeat(auto-fit, minmax(200px, 1fr)" gap>
       <Info label={t(labels.distinctId)} icon={<KeyRound />}>
-        <span style={{ overflowWrap: 'anywhere' }}>{data?.distinctId}</span>
+        {distinctId ? <span style={{ overflowWrap: 'anywhere' }}>{distinctId}</span> : '—'}
       </Info>
 
       <Info label={t(labels.lastSeen)} icon={<Calendar />}>
@@ -61,6 +64,12 @@ export function SessionInfo({ data }) {
       <Info label={t(labels.device)} icon={<TypeIcon type="device" value={data?.device} />}>
         {formatValue(data?.device, 'device')}
       </Info>
+
+      {distinctId && stitchedSessionCount > 1 && (
+        <Info label="Linked IDs" icon={<Network />}>
+          {stitchedSessionCount}
+        </Info>
+      )}
     </Grid>
   );
 }
