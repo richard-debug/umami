@@ -166,12 +166,13 @@ and refresh timing.
 
 Positive matches are rolled up in Postgres by website, IP, source, and UTC day. A signed
 cache-token timestamp limits the normal check to once per visitor per 24 hours, with an
-immediate recheck if the IP changes. Audit exports preserve historical evidence. Firewall
-exports are stricter: they include only historical high-confidence IPs that are still
-high-confidence in the current fresh snapshot. Audit and Cloudflare CSV output includes a
-`review_after` date seven days after the last observation so entries are not silently
-treated as permanent. Direct Cloudflare API synchronization and credential storage remain
-out of scope; the generated file is for review and manual import.
+immediate recheck if the IP changes. Audit, generic, and Cloudflare exports contain exactly
+the rows matching the selected date, search, source, and confidence filters. Selecting All
+confidence therefore includes medium-confidence aggregate matches; operators should review
+those before blocking. Audit and Cloudflare CSV output includes a `review_after` date seven
+days after the last observation so entries are not silently treated as permanent. Direct
+Cloudflare API synchronization and credential storage remain out of scope; the generated
+file is for review and manual import.
 
 Addresses that are not publicly routable are never flagged, whatever the feeds say. Lists
 built for firewall ingress filtering — FireHOL level1 among them — deliberately include
