@@ -68,7 +68,10 @@ Recommended exports:
 
 - Audit CSV: `ip,sources,first_seen,last_seen,hit_count,confidence,review_after`.
 - Generic WAF text: one unique IP or CIDR per line.
-- Cloudflare WAF CSV: one IP/CIDR per line with a description containing `review_after`.
+- Cloudflare WAF CSV: headerless `IP,DESCRIPTION`, one item per line. Descriptions contain
+  `review_after` and avoid additional CSV-like delimiters so the dashboard importer keeps
+  the IP and description in the intended columns; custom source labels are normalized and
+  the description is capped at Cloudflare's 500-character limit.
 
 ## Cloudflare WAF constraints
 

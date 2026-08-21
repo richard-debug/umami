@@ -1,5 +1,7 @@
 export type IpReputationExportFormat = 'audit' | 'generic' | 'cloudflare';
 
+const CLOUDFLARE_DESCRIPTION_MAX_LENGTH = 500;
+
 export interface IpReputationExportRow {
   ip: string;
   sources: string[];
@@ -33,6 +35,18 @@ function getReviewDate(value: Date | string) {
   return date.toISOString().slice(0, 10);
 }
 
+function getCloudflareDescription(row: IpReputationExportRow) {
+  const prefix = 'Umami sources=';
+  const suffix = ` hits=${row.hitCount} last=${toIso(row.lastSeenAt)} review_after=${getReviewDate(row.lastSeenAt)}`;
+  const sources = row.sources.map(source => source.replaceAll(/[^a-zA-Z0-9._-]+/g, '_')).join('+');
+  const sourceLength = Math.max(
+    0,
+    CLOUDFLARE_DESCRIPTION_MAX_LENGTH - prefix.length - suffix.length,
+  );
+
+  return `${prefix}${sources.slice(0, sourceLength)}${suffix}`;
+}
+
 export function formatIpReputationExport(
   rows: IpReputationExportRow[],
   format: IpReputationExportFormat,
@@ -46,9 +60,9 @@ export function formatIpReputationExport(
   if (format === 'cloudflare') {
     return uniqueRows
       .map(row => {
-        const description = `Umami: ${row.sources.join('|')}; hits=${row.hitCount}; last=${toIso(row.lastSeenAt)}; review_after=${getReviewDate(row.lastSeenAt)}`;
+        const description = getCloudflareDescription(row);
 
-        return `${csvCell(row.ip)},${csvCell(description, true)}`;
+        return `${csvCell(row.ip)},${csvCell(description)}`;
       })
       .join('\r\n')
       .concat(uniqueRows.length ? '\r\n' : '');
