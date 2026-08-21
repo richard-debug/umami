@@ -41,6 +41,10 @@ The three default aggregate sources (FireHOL, ipsum, and USTC) have overlapping 
 inputs, so their co-occurrence is not treated as independent corroboration. Custom sources
 can satisfy the two-source rule; direct Spamhaus DROP and Feodo matches qualify alone.
 
+This remains the recommended automatic-blocking policy. The application exports exactly
+the rows selected by its date, search, source, and confidence controls, so choosing All or
+Medium is an explicit operator decision and requires manual review before WAF import.
+
 Keep the source names, first/last seen timestamps, and local hit count in the audit export.
 Dynamic residential, VPN, carrier-grade NAT, and cloud IPs can change owners, so generated
 WAF entries should have an expiry/review date rather than becoming permanent by default.

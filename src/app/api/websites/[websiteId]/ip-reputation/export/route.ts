@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { getBlocklist } from '@/lib/blocklist';
 import {
   formatIpReputationExport,
   type IpReputationExportFormat,
@@ -45,20 +44,9 @@ export async function GET(
     confidence: query.confidence,
   });
   const format = query.format as IpReputationExportFormat;
-  let exportRows = rows;
-
-  // Audit CSV is historical evidence. Firewall-oriented formats are deliberately stricter:
-  // an address must have been high confidence during the period and still be high
-  // confidence in the current atomic feed snapshot.
-  if (format !== 'audit') {
-    const blocklist = await getBlocklist();
-
-    exportRows = rows.filter(row => row.exportable && blocklist.evaluate(row.ip).exportable);
-  }
-
   const extension = format === 'generic' ? 'txt' : 'csv';
 
-  return new Response(formatIpReputationExport(exportRows, format), {
+  return new Response(formatIpReputationExport(rows, format), {
     headers: {
       'Content-Disposition': `attachment; filename="ip-reputation-${format}.${extension}"`,
       'Content-Type': contentTypes[format],
